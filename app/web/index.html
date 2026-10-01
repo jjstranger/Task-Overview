@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- 标题栏那一串（含版本号）由 Python 的 version.TITLE 决定，并在页面加载后由
+     app.js 写回 document.title —— 这里只放个不带版本的兜底名，
+     免得版本号在 HTML 里再写一份、升级时漏改。 -->
+<title>天在看 - Travail Task Overview</title>
+<link rel="icon" href="../res/icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="syncBar">
+  <span id="syncTxt"></span>
+  <span class="spacer"></span>
+  <button id="syncReload">重新加载</button>
+  <button id="syncHide" class="mini">知道了</button>
+</div>
+
+<header>
+  <!-- 左上角只留产品图标，名字一概不显示（2026-10-01 用户口径）：
+       以前这儿跟着一行「项目看板」，窗口标题栏本来就写着品牌名，同一个名字
+       在屏幕上出现两次是白占版面。 -->
+  <div class="logo" id="logoBox"><img src="../res/icon.png" alt="" onerror="this.style.display='none'"></div>
+  <div class="seg" id="segPage">
+    <button class="act" data-v="tree">项目</button>
+    <button data-v="fin">财务</button>
+    <button data-v="heat">活跃</button>
+  </div>
+  <!-- 日期与刷新跟着页签走：它们说的是「当前这一页的数据」，放在页签右边就是
+       「这一页的数据是几点读的」，放在左边读起来像页面标题的一部分。 -->
+  <div class="date" id="date"></div>
+  <!-- 刷新：环形箭头是内联 SVG（不引用任何外部图片）。点一下 = 重画日期 + 重新读数据文件 +
+       按当前页补刷（财务表 / 活跃热力图）。 -->
+  <button id="btnRefresh" class="icon" title="刷新（重读数据文件并更新显示）">
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="23 4 23 10 17 10"></polyline>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+    </svg>
+  </button>
+  <div class="spacer"></div>
+  <button id="btnTop">置顶</button>
+  <button id="btnCheck" class="warn">打卡</button>
+  <button id="btnSet">设置</button>
+  <button id="btnNew">＋ 项目</button>
+</header>
+
+<main>
+  <div id="treeBar">
+    <button id="treeFilter">筛选 ▾</button>
+    <button id="treeMulti">多选</button>
+  </div>
+
+  <div id="bulkBar">
+    <span class="cnt" id="bulkCnt">已选 0 条</span>
+    <span class="hint" id="bulkHint">点行选中（连带子级）· Ctrl 加选/减选 · Shift 范围选</span>
+    <button id="bulkStat">改状态 ▾</button>
+    <button id="bulkArtist">改制作人 ▾</button>
+    <button id="bulkNone">清空</button>
+    <button id="bulkExit">退出多选</button>
+  </div>
+
+  <div id="tree"></div>
+
+  <div id="heat">
+    <div class="hhead">
+      <div class="seg" id="segYear"></div>
+      <div class="spacer"></div>
+      <div class="nag" id="heatTip"></div>
+    </div>
+    <div class="hcards" id="heatCards"></div>
+    <div class="gwrap">
+      <div class="wd" id="heatWd"></div>
+      <div class="grid" id="heatGrid"></div>
+    </div>
+    <div class="legend">少
+      <i style="background:var(--h0)"></i><i style="background:var(--h1)"></i>
+      <i style="background:var(--h2)"></i><i style="background:var(--h3)"></i>
+      <i style="background:var(--h4)"></i> 多
+    </div>
+    <div class="logbar">
+      <span class="lbt">变更记录<span class="hint" id="heatLogHint"></span></span>
+      <button id="heatLogMore">查看更多</button>
+    </div>
+    <div class="logs" id="heatLogs"></div>
+  </div>
+
+  <div id="fin">
+    <div class="fhead">
+      <select id="finYear"></select>
+      <select id="finClient"></select>
+      <div class="spacer"></div>
+      <button id="finClientsBtn">客户</button>
+      <button id="finExport">导出 ▾</button>
+      <button id="finAdd" class="on">＋ 记一笔</button>
+    </div>
+
+    <div id="finCards"></div>
+
+    <div class="fsec">
+      <div class="fsecth">项目款项 <span class="fk" id="finQ"></span></div>
+      <div id="finTable"></div>
+    </div>
+
+    <div class="fsec">
+      <div class="fsecth">应收账龄</div>
+      <div id="finAging"></div>
+    </div>
+
+    <div class="fsec">
+      <div class="fsecth">客户汇总</div>
+      <div id="finClientSum"></div>
+    </div>
+
+    <div class="hint" id="finTip" style="margin-top:14px"></div>
+  </div>
+</main>
+
+<footer id="foot"></footer>
+
+<div class="ov" id="ovNew">
+  <div class="ovbox" style="width:520px">
+    <h3>新建项目</h3>
+    <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="newTitle" placeholder="输入项目名，可用中文。"></div>
+    <div class="fld"><div class="lb">分类</div><div class="seg" id="segCat"></div></div>
+    <div class="fld"><div class="lb">项目根目录</div><input type="text" id="newPath" placeholder="可留空"><button id="btnPick">浏览</button></div>
+    <div class="fld"><div class="lb">截止日期</div><input type="date" id="newDl" style="max-width:170px"></div>
+    <div class="fld"><div class="lb">客户</div>
+      <input type="text" id="newClient" list="clientOpts" placeholder="选已有客户，或直接输入新名字" style="max-width:240px">
+      <datalist id="clientOpts"></datalist>
+    </div>
+    <div class="fld"><div class="lb">合同额</div>
+      <input type="text" id="newAmount" placeholder="可留空" style="max-width:120px">
+      <span class="hint">元</span>
+      <span class="hint">税率%</span><input type="text" id="newTax" style="max-width:56px">
+    </div>
+    <div class="fld"><div class="lb">首款到账</div>
+      <input type="text" id="newPaid" placeholder="可留空" style="max-width:120px">
+      <span class="hint">日期</span><input type="date" id="newPaidDate" style="max-width:150px">
+    </div>
+    <div class="closebar"><button id="newCancel">取消</button><button id="newOk" class="on">创建</button></div>
+  </div>
+</div>
+
+<div class="ov" id="ovSet">
+  <div class="ovbox">
+    <h3 title="改动即时生效，写入数据库 settings 表。">设置</h3>
+    <div class="fld" style="border-top:none"><div class="lb">界面配色</div>
+      <div class="seg" id="segTheme"><button data-t="dark">暗色</button><button data-t="light">亮色</button><button data-t="auto">跟随系统</button></div>
+    </div>
+    <!-- 设置页的说明文字一律不占版面：改成悬停在这行标题上才冒出来的工具提示（title）。
+         数据文件那条是动态的（来源/默认位置/可写性），由 loadDbInfo() 写进 title。 -->
+    <div class="fld"><div class="lb" id="setPathLb" title="当前读取的数据文件">数据文件</div>
+      <div class="vl" id="setPath"></div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button id="setPathPick">更改</button>
+        <button id="setPathDefault">恢复默认位置</button>
+      </div>
+    </div>
+    <div class="fld"><div class="lb" title="两台机器共用一个数据文件；改动靠 SQLite 排队，另一边改完这边会提示重新加载。改完要重启">多机同时打开</div>
+      <button id="setShare" data-tg>已关闭</button>
+    </div>
+    <div class="fld"><div class="lb">导出目录</div><div class="vl" id="setExport"></div><button id="setExportPick">更改</button></div>
+    <div class="fld"><div class="lb">开机自启</div><button id="setAuto" data-tg>已关闭</button></div>
+    <div class="fld"><div class="lb">启动即置顶</div><button id="setTop" data-tg>已关闭</button></div>
+    <div class="fld"><div class="lb" title="关掉页面沙箱，页面起不来时才需要，重启生效">兼容模式</div><button id="setSandbox" data-tg>已关闭</button></div>
+    <div class="fld"><div class="lb">提醒强度</div>
+      <div class="seg" id="segLv"><button data-l="1">L1 通知</button><button data-l="2">L2 置顶弹窗</button><button data-l="3">L3 全屏遮挡</button></div>
+    </div>
+    <div class="fld"><div class="lb">打卡时间</div><input type="time" id="setTime" style="max-width:120px"></div>
+    <div class="fld"><div class="lb">停滞阈值</div><div style="display:flex;gap:8px;align-items:center">超过 <input type="text" class="w" id="setStale"> 天没动静就算停滞</div></div>
+    <div class="fld"><div class="lb">系统通知</div><button id="setNotify" data-tg>已关闭</button></div>
+    <div class="fld"><div class="lb">重提醒间隔</div><div style="display:flex;gap:8px;align-items:center">未打卡时每 <input type="text" class="w" id="setNag"> 分钟提醒 · 告警每 <input type="text" class="w" id="setAlert"> 分钟</div></div>
+    <div class="fld"><div class="lb">快捷键</div>
+      <div class="vl" style="line-height:1.9">Ctrl+N 新建项目 · Ctrl+1/2/3 项目 / 活跃 / 财务 · Ctrl+D 打卡 · Ctrl+, 设置 · Esc 关弹窗</div>
+    </div>
+    <div class="fld"><div class="lb" style="font-weight:600" title="退出时自动留一份，最多 10 份">数据快照</div>
+      <div class="vl" id="setSnapDir"></div>
+    </div>
+    <div class="fld" style="border-top:none"><div class="lb">备份</div>
+      <button id="snapNow" class="on">立即备份</button>
+      <button id="snapOpen">打开备份目录</button>
+    </div>
+    <div class="fld"><div class="lb" title="会覆盖当前数据；回滚前自动再存一份">回滚</div>
+      <select id="snapList" style="max-width:330px"></select>
+      <button id="snapRestore" class="warn">恢复到此快照</button>
+    </div>
+    <!-- 版本行放最末：看一眼"这是哪一版"是排查问题的第一步，
+         数字一律由 Python 的 version.py 给（前端不写死版本号）。
+         刻意**不加 title 工具提示** —— 「版本」两个字不需要解释，
+         而设置页 `.lb[title]` 的条数（5 处）是有断言钉着的。 -->
+    <div class="fld"><div class="lb">版本</div>
+      <div class="vl" id="setVer"></div>
+    </div>
+    <div class="closebar"><button id="setClose">关闭</button></div>
+  </div>
+</div>
+
+<div class="ov" id="ovCheck">
+  <div class="ovbox">
+    <h3>今日打卡</h3>
+    <p class="sub">勾选今天要推进的项目，确认后计入活跃记录。</p>
+    <div id="checkList"></div>
+    <div class="lk-note" id="checkNote" style="display:none"></div>
+    <div class="closebar"><button id="checkCancel">稍后</button><button id="checkOk" class="on">确认打卡</button></div>
+  </div>
+</div>
+
+<div id="ovBlock">
+  <div class="bt">今天要推进什么？</div>
+  <div class="bs">勾掉今天打算推进的项目，才能继续用这台机器。确认后记录一次打卡并计入活跃记录。</div>
+  <div class="bl" id="blockList"></div>
+  <div style="display:flex;gap:8px"><button id="blockOk" class="on">确认开始</button></div>
+  <div class="nag" id="blockNag"></div>
+</div>
+
+<div class="ov" id="ovFin">
+  <div class="ovbox" style="width:520px">
+    <h3 id="finTitle">记一笔</h3>
+    <p class="sub">合同额 / 到账 / 外包支出分开记，汇总口径：待收 = 合同额 − 已收，实际收入 = 已收 − 外包支出。开票金额只进导出的表格，不在看板上展示。</p>
+    <div class="fld" style="border-top:none"><div class="lb">类型</div>
+      <div class="seg" id="finKind">
+        <button data-k="contract">合同额</button>
+        <button data-k="payment" class="act">到账</button>
+        <button data-k="outsource">外包支出</button>
+        <button data-k="invoice">开票</button>
+      </div>
+    </div>
+    <div class="fld"><div class="lb">项目</div><select id="finPrj"></select></div>
+    <div class="fld"><div class="lb">挂到</div>
+      <select id="finNode"><option value="">项目整体</option></select>
+      <span class="hint">可选，比如分批款对应某个环节</span>
+    </div>
+    <div class="fld"><div class="lb">金额</div>
+      <input type="text" id="finAmount" placeholder="0.00" style="max-width:150px">
+      <span class="hint">元</span>
+      <span class="hint">税率%</span><input type="text" id="finTax" style="max-width:60px">
+    </div>
+    <div class="fld"><div class="lb">日期</div><input type="date" id="finDate" style="max-width:170px"></div>
+    <div class="fld"><div class="lb">状态</div><select id="finStatus"></select></div>
+    <div class="fld" id="finInvRow"><div class="lb">发票号</div><input type="text" id="finInvNo" placeholder="可留空"></div>
+    <div class="fld"><div class="lb">备注</div><input type="text" id="finNote" placeholder="可留空"></div>
+    <div class="closebar">
+      <button id="finDel" style="display:none;margin-right:auto;color:var(--red)">删除这笔</button>
+      <button id="finCancel">取消</button><button id="finOk" class="on">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="ov" id="ovNodes">
+  <div class="ovbox" style="width:580px">
+    <h3>新增子环节</h3>
+    <p class="sub" id="nodesTo"></p>
+    <div class="fld top" style="border-top:none"><div class="lb">名称</div>
+      <textarea id="nodesSpec" rows="3" placeholder="s001,s003A,s006-009"></textarea>
+    </div>
+    <div class="hint" style="line-height:1.9">
+      多个名字用 <b>逗号 / 分号 / 顿号 / 空格 / 换行</b> 分隔；<b>连接号</b>一次生成连续编号。<br>
+      例：<code>s001,s003A,s006-009</code> → s001 · s003A · s006 · s007 · s008 · s009<br>
+      名字里本来带连接号的（如 SANTI-OneDay）原样写就行，不会被展开；实在要保险可以用引号包起来：<code>"phase1-3"</code>
+    </div>
+    <div class="prev" id="nodesPrev"></div>
+    <div class="closebar"><button id="nodesCancel">取消</button><button id="nodesOk" class="on">创建</button></div>
+  </div>
+</div>
+
+<div class="ov" id="ovCli">
+  <div class="ovbox" style="width:560px">
+    <h3>客户</h3>
+    <p class="sub">结算周期写清楚，催款时用得上。</p>
+    <div id="cliList"></div>
+    <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="cliName" placeholder="客户 / 公司名"></div>
+    <div class="fld"><div class="lb">联系人</div><input type="text" id="cliContact"></div>
+    <div class="fld"><div class="lb">电话 / 邮箱</div>
+      <input type="text" id="cliPhone" style="max-width:150px"><input type="text" id="cliEmail">
+    </div>
+    <div class="fld"><div class="lb">结算周期</div>
+      <input type="text" id="cliCycle" placeholder="月结 30 / 交付后 15 天 / 按镜头结算">
+    </div>
+    <div class="fld"><div class="lb">默认币种</div><input type="text" id="cliCcy" value="CNY" style="max-width:80px"></div>
+    <div class="closebar">
+      <button id="cliDel" style="display:none;color:var(--red)">删除客户</button>
+      <button id="cliReset" style="margin-right:auto">清空表单</button>
+      <button id="cliClose">关闭</button>
+      <button id="cliSave" class="on">保存客户</button>
+    </div>
+  </div>
+</div>
+
+<!-- 全部变更记录：活跃页面板只列最近一周，要看更早的走这儿翻。
+     按天分组、每天可折叠，一次拉 200 条，「加载更多」接着往回翻。 -->
+<div class="ov" id="ovLogs">
+  <div class="ovbox" style="width:760px">
+    <h3>全部变更记录<span class="hint" id="logTotal"></span></h3>
+    <div class="logs" id="allLogs"></div>
+    <div class="closebar">
+      <button id="logMore" style="margin-right:auto">加载更多</button>
+      <button id="logClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

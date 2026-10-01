@@ -1,0 +1,306 @@
+:root{
+  --bg:#16161a; --panel:#1e1e24; --panel2:#24242c; --line:#2e2e36; --rowalt:rgba(255,255,255,.035);
+  --tx:#e6e6ea; --tx2:#9a9aa5; --tx3:#6b6b76;
+  --blue:#6aa5f8; --amber:#e0a34c; --green:#4caf82; --red:#e05c5c; --purple:#a99bf2; --gray:#6b6b76;
+  --sel:rgba(106,165,248,.16);
+  --h0:#202027; --h1:#0e4429; --h2:#006d32; --h3:#26a641; --h4:#39d353;
+}
+body.light{
+  --bg:#f4f4f2; --panel:#ffffff; --panel2:#efefec; --line:#e2e2dd; --rowalt:#f8f8f6;
+  --tx:#1b1b1e; --tx2:#5f5e5a; --tx3:#8a8a84;
+  --blue:#2f6fd0; --amber:#a86a10; --green:#2f7d55; --red:#c0392b; --purple:#6a5acd; --gray:#9a9a94;
+  --sel:rgba(47,111,208,.13);
+  --h0:#ececeb; --h1:#9be9a8; --h2:#40c463; --h3:#30a14e; --h4:#216e39;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--tx);font:13px/1.6 "Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;overflow:hidden;user-select:none;display:flex;flex-direction:column}
+button{background:transparent;color:var(--tx2);border:1px solid var(--line);border-radius:7px;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
+button:hover{border-color:var(--tx3);color:var(--tx)}
+button.on{background:var(--sel);border-color:var(--blue);color:var(--blue)}
+button.warn{background:rgba(224,92,92,.14);border-color:var(--red);color:var(--red)}
+button.mini{border:none;padding:2px 6px;color:var(--tx3);font-size:12px}
+button.mini:hover{color:var(--tx)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{border:none;border-radius:0;padding:4px 11px}
+.seg button.act{background:var(--sel);color:var(--blue)}
+
+/* ---------- 顶部页面页签（项目 / 财务 / 活跃） ---------- */
+/* 比普通 seg 大一圈，一眼能看出是「切页面」而不是「筛分类」。
+   左边多留一截：它紧贴着产品图标，得让人看出来「图标」和「导航」是两回事；
+   页签里侧跟上日期与刷新，三者算同一组（说的都是当前这一页的数据）。 */
+#segPage{border-radius:8px;margin-left:6px}
+#segPage button{padding:5px 18px;font-size:12.5px;font-weight:500}
+#segPage button.act{font-weight:600}
+
+/* 新建项目里的分类选择：分类现在可以自己加，多了会撑破一行 ——
+   允许换行，并让每颗按钮自己成立（seg 那种"连成一排"的样子换行时很难看） */
+#segCat{flex-wrap:wrap;overflow:visible;gap:4px;border:none}
+#segCat button{border:1px solid var(--line);border-radius:7px;padding:3px 12px}
+#segCat button.act{border-color:var(--blue)}
+
+/* ---------- 多机共享提示条 ---------- */
+/* 平时整条不占位；开「多机同时打开」后才可能露出来。
+   为什么不用 toast：toast 两秒就没了，而"另一边改过数据"要一直提示到用户
+   真的重新加载为止 —— 不然他会继续拿旧数据改，改完反向覆盖对方。 */
+#syncBar{
+  display:none;align-items:center;gap:8px;padding:5px 14px;
+  border-bottom:1px solid var(--line);background:rgba(224,163,76,.12);
+  color:var(--amber);font-size:12px
+}
+#syncBar.on{display:flex}
+#syncBar button{padding:2px 9px;border-color:rgba(224,163,76,.45);color:var(--amber)}
+#syncBar button:hover{border-color:var(--amber);color:var(--amber)}
+#syncBar.calm{background:var(--panel2);color:var(--tx3)}
+#syncBar.calm button{border-color:var(--line);color:var(--tx3)}
+
+header{display:flex;align-items:center;gap:9px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+/* 顶栏左上角的产品图标：名字已经在窗口标题栏上写着了，这里不再跟一行字。 */
+.logo{display:inline-flex;align-items:center}
+.logo img{width:18px;height:18px;display:block;flex:none;border-radius:4px}
+.date{color:var(--tx3);font-size:11px}
+.spacer{flex:1}
+
+/* 顶栏的图标按钮（目前只有「刷新」）：内联 SVG 环形箭头，不引用外部图片。
+   比普通按钮窄一圈，免得在日期和页签之间挤出一条空白。 */
+header button.icon{display:inline-flex;align-items:center;justify-content:center;padding:3px 6px;color:var(--tx3)}
+header button.icon:hover{color:var(--tx)}
+header button.icon svg{display:block}
+header button.icon svg.spin{animation:spin .55s cubic-bezier(.4,0,.2,1)}
+@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+/* 设置页的说明文字都收进了 title：把光标换成问号形状，让人知道这儿能停一下 */
+.lb[title]{cursor:help}
+
+main{flex:1;padding:10px 12px;overflow:auto}
+/* 三个页面容器不强制 height:100%：内容多高就多高。
+   之前强制撑满 main，再加上面还有一行筛选栏，内容再短也凭空多出一条滚动空间。 */
+#heat,#fin{display:none;padding:6px 2px}
+.row{display:flex;align-items:center;gap:7px;padding:4px 8px;border-radius:7px;position:relative}
+.row:hover{background:var(--panel2)}
+.row.grp{background:var(--panel2);margin-top:9px}
+.row.prj{background:var(--rowalt);border:1px solid var(--line);margin-top:5px}
+.tw{width:14px;text-align:center;color:var(--tx3);cursor:pointer;font-size:10px;flex:none}
+/* 状态色块：原来是 7px 圆点，太小、扫一列看不出来状态。
+   改成竖条色块（宽 6 / 高 15），一眼能扫完一整列。 */
+.dot{width:6px;height:15px;border-radius:2px;flex:none;margin-right:2px}
+/* 叶子环节可点：悬停提亮，暗示能点 */
+.row .dot[title]:hover{filter:brightness(1.35)}
+.title{font-size:13px;cursor:text;border-radius:4px;padding:0 3px}
+.title:focus{outline:1px solid var(--blue);background:var(--panel2)}
+.row.grp .title,.row.prj .title{font-weight:500}
+.meta{font-size:11px;color:var(--tx3);flex:none}
+.meta.who{color:var(--tx2);border:1px solid var(--line);border-radius:5px;padding:0 5px}
+/* 到期小标：文案是整句话（「3 天后到期」），别让它被挤到换行 */
+.meta.due{white-space:nowrap}
+/* 只有状态徽章可点（点开状态菜单），所以只有它给 pointer + hover 反馈。
+   别的徽章（今日必做 / 置顶 / 已归档）是纯标记 —— 给它们 hover 高亮等于
+   暗示"这儿能点"，跟 2026-09-30 那个"点今日必做才弹菜单"是同一种误导。 */
+.badge{font-size:11px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);color:var(--tx2);flex:none;cursor:default}
+.badge.st{cursor:pointer}
+.badge.st:hover{border-color:var(--tx3)}
+.open{margin-left:auto;font-size:11px;color:var(--tx3);padding:1px 7px;border:1px solid var(--line);border-radius:6px;cursor:pointer;flex:none}
+.open:hover{color:var(--blue);border-color:var(--blue)}
+.bar{width:52px;height:4px;background:var(--line);border-radius:3px;overflow:hidden;flex:none}
+.bar i{display:block;height:100%;background:var(--green)}
+.stale{color:var(--red)}
+.ops{margin-left:auto;display:flex;gap:2px;align-items:center;opacity:0;flex:none}
+.row:hover .ops{opacity:1}
+.row .open{margin-left:0}
+/* 子环节筛选框：默认跟着 .ops 一起藏着；**筛上了就一直露着** ——
+   不然鼠标一挪开，看不出这行下面其实还筛着东西 */
+.row.filtered .ops{opacity:1}
+.ops .flt{font-size:11px;color:var(--tx3);padding:1px 7px;border:1px solid var(--line);border-radius:6px;flex:none;background:transparent}
+.ops .flt:hover{color:var(--tx);border-color:var(--tx3)}
+.ops .flt.on{color:var(--blue);border-color:var(--blue);background:var(--sel)}
+/* 这一层被筛空了：说清楚是筛选的缘故，不然看着像子环节丢了 */
+.empty-node{padding:3px 8px;font-size:11px;color:var(--tx3)}
+
+footer{display:flex;gap:16px;padding:7px 14px;border-top:1px solid var(--line);background:var(--panel2);font-size:11px;color:var(--tx2);flex-wrap:wrap}
+
+/* max-height + 滚动：筛选菜单加了「环节状态 / 制作人」两组后能有二十来项，
+   不设上限会顶出屏幕（定位里怎么算都是负值，菜单就跑到窗口外面去了） */
+.popup{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px;z-index:100;min-width:150px;max-height:70vh;overflow:auto;box-shadow:0 8px 26px rgba(0,0,0,.45)}
+.popup div{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap}
+.popup div:hover{background:var(--panel2)}
+.popup div.sep{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
+.popup div.dim{color:var(--tx3)}
+/* 子环节筛选框顶上的搜索框：打字即时筛，弹层不关 */
+.popup input.psearch{display:block;width:100%;margin:2px 0 5px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--tx);font:inherit;font-size:12px;outline:none}
+.popup input.psearch:focus{border-color:var(--blue)}
+.popup input.psearch::placeholder{color:var(--tx3)}
+/* 组标题（「状态（可多选）」这类）：纯标签，不可点、不响应 hover */
+.popup div.ttl{padding:5px 10px 2px;color:var(--tx3);font-size:11px;cursor:default}
+.popup div.ttl:hover{background:transparent}
+/* 分组标题行现在有两个按钮：⋯（改名 / 新建 / 删分类）+ ＋（在这个分类下建项目）。
+   这两颗**不跟着 hover 藏**（只有两三个分组行，常驻更让人发现分类能改、能加项目），
+   悬停时提亮到正常亮度。 */
+.row.grp .ops{margin-left:auto;display:flex;gap:2px;opacity:.5}
+.row.grp:hover .ops{opacity:1}
+.row.grp .ops button.mini{padding:0 6px}
+/* ＋ 比 ⋯ 重要一点：字号大一号、悬停染蓝，作为「在这儿加项目」的入口 */
+.row.grp .ops button.mini.add{font-size:14px;padding:0 7px;line-height:1}
+.row.grp .ops button.mini.add:hover{color:var(--blue)}
+/* 双击改分类名时，编辑中的那格给个可见的框（不然像没反应） */
+.row.grp .title[contenteditable="true"]{outline:1px solid var(--blue);border-radius:4px;padding:0 4px;cursor:text}
+
+/* 一组横向小动作（反选 / 清空）。多选菜单要它 ——
+   两个竖着排会把下面的候选项推远 */
+.popup div.acts{display:flex;gap:4px;padding:2px 6px 5px;cursor:default}
+.popup div.acts:hover{background:transparent}
+.popup div.acts button{flex:1;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--tx);font:inherit;font-size:11px;cursor:pointer}
+.popup div.acts button:hover{border-color:var(--blue);color:var(--blue)}
+
+.ov{position:fixed;inset:0;background:rgba(8,8,10,.66);display:none;align-items:center;justify-content:center;z-index:200}
+.ovbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;width:440px;max-height:86%;overflow:auto}
+.ovbox h3{font-size:14px;font-weight:500;margin-bottom:4px}
+.ovbox p.sub{font-size:12px;color:var(--tx2);margin-bottom:12px}
+.fld{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line);font-size:12px}
+.fld .lb{width:86px;color:var(--tx2);flex:none}
+.fld .vl{flex:1;color:var(--tx3);font-size:11px;word-break:break-all}
+input[type=text],input[type=date],input[type=time]{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12px;width:100%}
+input.w{width:60px}
+.hint{font-size:11px;color:var(--tx3);line-height:1.5}
+.hint code,.prev code{background:var(--rowalt);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:11px}
+.fld.top{align-items:flex-start}
+.fld textarea{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;
+  padding:6px 8px;font:inherit;font-size:12px;width:100%;resize:vertical;line-height:1.7}
+/* 批量新增子环节：解析结果的实时预览 */
+.prev{margin-top:10px;font-size:11.5px;color:var(--tx2);background:var(--panel2);
+  border:1px solid var(--line);border-radius:8px;padding:8px 10px;max-height:132px;overflow:auto;line-height:1.8}
+.prev.bad{color:var(--red);border-color:var(--red)}
+.prev b{color:var(--tx);font-weight:500}
+.prev .n{color:var(--blue)}
+.prev .tag{display:inline-block;background:var(--rowalt);border:1px solid var(--line);border-radius:5px;
+  padding:1px 7px;margin:2px 4px 2px 0;font-size:11px;color:var(--tx)}
+.prev .tag.new{border-color:var(--blue);color:var(--blue)}
+.prev .tag.dup{opacity:.5;text-decoration:line-through}
+.closebar{text-align:right;margin-top:14px;display:flex;gap:8px;justify-content:flex-end}
+.empty{color:var(--tx3);font-size:12px;padding:18px 4px;text-align:center}
+.err{color:var(--red);font-size:11px}
+
+/* ---------- 活跃热力图 ---------- */
+.hhead{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.hcards{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.hcard{flex:1;min-width:118px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px}
+.hcard .n{font-size:20px;font-weight:500;line-height:1.2}
+.hcard .l{font-size:11px;color:var(--tx3)}
+.gwrap{display:flex;gap:6px;align-items:flex-start}
+.wd{display:grid;grid-template-rows:repeat(7,11px);gap:3px;font-size:9px;color:var(--tx3);line-height:11px}
+.grid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,11px);gap:3px;overflow-x:auto;padding-bottom:4px}
+.grid i{width:11px;height:11px;border-radius:2px;background:var(--h0);display:block}
+.grid i.l1{background:var(--h1)}
+.grid i.l2{background:var(--h2)}
+.grid i.l3{background:var(--h3)}
+.grid i.l4{background:var(--h4)}
+.grid i.fut{opacity:.28}
+.legend{display:flex;gap:5px;align-items:center;font-size:11px;color:var(--tx3);margin-top:8px}
+.legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+/* ---------- 变更记录（按天分组，可折叠） ---------- */
+/* 上边框挪到 .logbar 上了 —— .logs 现在两处都用（活跃面板 + 全量弹窗），
+   弹窗里顶上再横一条线很难看 */
+.logbar{display:flex;align-items:center;gap:8px;margin-top:16px;border-top:1px solid var(--line);padding-top:8px}
+.logbar .lbt{font-size:12px;color:var(--tx2)}
+.logbar button{margin-left:auto;font-size:11px;padding:2px 10px}
+.logs{margin-top:2px}
+.dgrp{border-bottom:1px solid var(--line)}
+.dgrp.open{border-bottom-color:transparent}
+.dgh{display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer}
+.dgh:hover{background:var(--rowalt)}
+.dgh .tw{flex:none;width:10px;font-size:9px;color:var(--tx3)}
+.dgh .dgday{font-size:12px;color:var(--tx2)}
+.dgh .dgn{font-size:11px;color:var(--tx3);margin-left:auto}
+.dgb{padding:0 0 6px 14px}
+.dgb .log:last-child{border-bottom:none}
+.log{display:flex;gap:10px;align-items:baseline;padding:6px 2px;border-bottom:1px solid var(--line);font-size:12px}
+.log .kt{flex:none;font-size:11px;color:var(--tx3);width:52px}
+.log .dt{flex:1;color:var(--tx)}
+.log .pt{flex:none;color:var(--tx3);font-size:11px}
+.log .ts{flex:none;color:var(--tx3);font-size:11px;width:82px;text-align:right}
+
+/* ---------- 财务 ---------- */
+.fhead{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.fhead select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:7px;padding:4px 8px;font:inherit;font-size:12px}
+/* 汇总卡两行三张：行内间距比默认的 14px 收一点，两行才不显得散 */
+#finCards .hcards{margin-bottom:9px}
+#finCards .hcards:last-child{margin-bottom:14px}
+.fsec{margin-top:18px}
+.fsecth{font-size:12px;color:var(--tx2);padding-bottom:6px;border-bottom:1px solid var(--line);margin-bottom:2px;display:flex;gap:8px;align-items:baseline}
+.fsecth .fk{font-size:11px;color:var(--tx3)}
+.ftrow{display:grid;grid-template-columns:1.6fr 1fr .75fr .8fr .75fr .85fr .8fr .8fr 22px;gap:8px;
+  align-items:center;padding:6px 6px;border-bottom:1px solid var(--line);border-radius:6px}
+.ftrow.head{color:var(--tx3);font-size:11px;border-bottom:1px solid var(--tx3)}
+.ftrow.body{cursor:pointer}
+.ftrow.body:hover{background:var(--panel2)}
+.ftrow .num{text-align:right;font-variant-numeric:tabular-nums}
+.ftrow .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ftrow .pend{color:var(--amber)}
+.ftrow .recv{color:var(--green)}
+.ftrow .out{color:var(--amber)}
+.ftrow .zero{color:var(--tx3)}
+.ftrow .tag{font-size:10px;color:var(--tx3);border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px}
+.ftrow .tw{font-size:10px;color:var(--tx3);text-align:center}
+.subrow{background:var(--rowalt)}
+.subrow{display:grid;grid-template-columns:88px 1fr 1.2fr .8fr .6fr 1.2fr 26px;gap:8px;
+  align-items:center;padding:5px 14px;font-size:11px;color:var(--tx2);border-bottom:1px solid var(--line)}
+.subrow .num{text-align:right;font-variant-numeric:tabular-nums}
+.subrow .op{cursor:pointer;color:var(--tx3);text-align:center}
+.subrow .op:hover{color:var(--blue)}
+.aging{display:flex;gap:10px;flex-wrap:wrap}
+.abk{flex:1;min-width:130px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px}
+.abk .l{font-size:11px;color:var(--tx3)}
+.abk .n{font-size:17px;font-weight:500;line-height:1.35}
+.abk.warn .n{color:var(--amber)}
+.abk.bad{border-color:var(--red)}
+.abk.bad .n{color:var(--red)}
+.agingdt{margin-top:8px;font-size:11px;color:var(--tx3)}
+.agingdt .x{display:inline-block;margin:2px 10px 2px 0}
+#fin select,#ovFin select,#ovCli input{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12px}
+#ovFin select,#ovCli input{flex:1;min-width:0}
+
+/* ---------- 打卡遮挡（L3） ---------- */
+#ovBlock{position:fixed;inset:0;background:var(--bg);z-index:400;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:34px;text-align:center}
+#ovBlock .bt{font-size:21px;font-weight:500}
+#ovBlock .bs{font-size:12px;color:var(--tx2);max-width:520px}
+#ovBlock .bl{width:520px;max-width:92vw;max-height:40vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px;text-align:left}
+#ovBlock .bl label{display:flex;gap:9px;align-items:center;padding:7px 0;border-top:1px solid var(--line);font-size:13px;cursor:pointer}
+#ovBlock .bl label:first-child{border-top:none}
+#ovBlock .bl input{width:auto}
+.lk-note{font-size:11px;color:var(--amber);margin-top:10px}
+.nag{font-size:11px;color:var(--tx3)}
+
+/* ---------- M4：拖拽落点 / 轻提示 ---------- */
+
+/* 顶栏「全部展开 / 全部折叠 / 只看项目」三个按钮按用户要求撤掉了，
+   展开折叠改成逐行点 ▼；这里只剩「筛选 ▾」一个按钮（提示文字也已撤）。 */
+#treeBar{display:flex;align-items:center;gap:7px;margin:2px 0 6px}
+#treeBar button{font-size:11px;padding:3px 9px}
+
+/* 多选批量条：只在多选模式下出现，紧贴筛选栏下方（issue #3） */
+#bulkBar{display:none;align-items:center;gap:7px;margin:-2px 0 6px;padding:5px 8px;
+  border:1px solid var(--blue);border-radius:8px;background:var(--panel2)}
+#bulkBar button{font-size:11px;padding:3px 9px}
+#bulkBar .cnt{font-size:11px;color:var(--tx3);margin-right:2px}
+/* 操作提示：告诉用户有三种点法（Ctrl / Shift），不然发现不了 */
+#bulkBar .hint{font-size:10.5px;color:var(--tx3);margin-right:auto;
+  padding-left:8px;border-left:1px solid var(--line)}
+/* 勾上的行整条淡蓝底，一眼看出批量操作会作用到哪些 */
+.row.picked{background:var(--sel)}
+/* 行首复选框：多选专用，别让它被行内其它元素挤歪 */
+.row input.pick{width:13px;height:13px;margin:0 6px 0 0;flex:none;cursor:pointer;
+  accent-color:var(--blue)}
+/* 归档项目（开了「显示归档项目」才会出现）：压暗 + 单独一个徽章，一眼跟在做项目分开 */
+.row.arch{opacity:.55}
+.badge.arch{color:var(--tx3);border-style:dashed}
+
+.row.dragging{opacity:.4}
+/* 落点提示：上边一条线 = 插到它前面，下边一条线 = 插到它后面，整框虚线 = 放进它里面 */
+.row.dz-before{box-shadow:inset 0 2px 0 0 var(--blue)}
+.row.dz-after{box-shadow:inset 0 -2px 0 0 var(--blue)}
+.row.dz-inside{outline:1px dashed var(--blue);outline-offset:-2px}
+
+#toast{position:fixed;left:50%;bottom:44px;transform:translateX(-50%) translateY(8px);
+  background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:8px;
+  padding:7px 15px;font-size:12px;opacity:0;pointer-events:none;z-index:999;
+  transition:opacity .16s,transform .16s}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}

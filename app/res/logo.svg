@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="512"
+   height="512"
+   viewBox="0 0 512 512"
+   version="1.1"
+   id="svg3"
+   sodipodi:docname="ttov_logo.svg"
+   inkscape:version="1.3.2 (091e20e, 2023-11-25, custom)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview3"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="3.7011719"
+     inkscape:cx="256"
+     inkscape:cy="256"
+     inkscape:window-width="3732"
+     inkscape:window-height="2126"
+     inkscape:window-x="97"
+     inkscape:window-y="-11"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="icon-retro" />
+  <defs
+     id="defs3">
+    <clipPath
+       id="clip-frame">
+      <rect
+         width="512"
+         height="512"
+         rx="112"
+         id="rect1" />
+    </clipPath>
+    <clipPath
+       id="clip-sun">
+      <circle
+         cx="256"
+         cy="176"
+         r="124"
+         id="circle1" />
+    </clipPath>
+    <linearGradient
+       id="sun-gradient"
+       x1="132"
+       y1="52"
+       x2="132"
+       y2="300"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="matrix(1.0824322,0,0,1.0824322,-21.102633,-14.50806)">
+      <stop
+         offset="0"
+         stop-color="#F7C948"
+         id="stop1" />
+      <stop
+         offset="0.55"
+         stop-color="#F2913D"
+         id="stop2" />
+      <stop
+         offset="1"
+         stop-color="#E1552B"
+         id="stop3" />
+    </linearGradient>
+  </defs>
+  <g
+     id="icon-retro"
+     inkscape:label="Retror 图标"
+     clip-path="url(#clip-frame)">
+    <!-- ===== 1. 背景 ===== -->
+    <g
+       id="background"
+       inkscape:label="背景 Background">
+      <rect
+         id="background-fill"
+         inkscape:label="背景底色"
+         width="512"
+         height="512"
+         fill="#F3E2C0" />
+    </g>
+    <!-- ===== 2. 装饰圆环 ===== -->
+    <g
+       id="deco-rings"
+       inkscape:label="装饰圆环 Deco Rings"
+       transform="matrix(1.4326581,0,0,1.32198,-110.76048,3.33151)">
+      <circle
+         id="ring-outer"
+         inkscape:label="外圈环 Outer Ring"
+         cx="256"
+         cy="176"
+         r="166"
+         fill="none"
+         stroke="#e1552b"
+         stroke-width="6"
+         opacity="0.3" />
+      <circle
+         id="ring-inner"
+         inkscape:label="内圈环 Inner Ring"
+         cx="256"
+         cy="176"
+         r="150"
+         fill="none"
+         stroke="#2a9d8f"
+         stroke-width="6"
+         opacity="0.5" />
+    </g>
+    <!-- ===== 3. 太阳 ===== -->
+    <g
+       id="sun"
+       inkscape:label="太阳 Sun"
+       transform="matrix(1.4326581,0,0,1.32198,-110.76048,3.33151)">
+      <circle
+         id="sun-disc"
+         inkscape:label="日轮 Sun Disc"
+         cx="256"
+         cy="176"
+         r="134.22157"
+         fill="url(#sun-gradient)"
+         style="fill:url(#sun-gradient);stroke-width:1.08243" />
+      <g
+         id="sun-stripes"
+         inkscape:label="落日条纹 Sun Stripes"
+         clip-path="url(#clip-sun)"
+         fill="#f3e2c0"
+         transform="matrix(1.0824322,0,0,1.0824322,-21.102633,-14.50806)">
+        <rect
+           id="sun-stripe-1"
+           inkscape:label="条纹 1"
+           x="100"
+           y="214"
+           width="312"
+           height="10" />
+        <rect
+           id="sun-stripe-2"
+           inkscape:label="条纹 2"
+           x="100"
+           y="240"
+           width="312"
+           height="12" />
+        <rect
+           id="sun-stripe-3"
+           inkscape:label="条纹 3"
+           x="100"
+           y="266"
+           width="312"
+           height="14" />
+        <rect
+           id="sun-stripe-4"
+           inkscape:label="条纹 4"
+           x="100"
+           y="292"
+           width="312"
+           height="16" />
+      </g>
+    </g>
+    <!-- ===== 4. 眼睛 ===== -->
+    <g
+       id="eye"
+       inkscape:label="眼睛 Eye"
+       transform="matrix(1.5817703,0,0,1.4595728,-148.9332,-38.408144)">
+      <path
+         id="eye-shape"
+         inkscape:label="眼睑 Eye Shape"
+         d="m 186,158 q 70,-50 140,0 -70,50 -140,0 z"
+         fill="#f3e2c0"
+         stroke="#4a2c1a"
+         stroke-width="13"
+         stroke-linejoin="round" />
+      <circle
+         id="eye-iris"
+         inkscape:label="虹膜 Iris"
+         cx="256"
+         cy="158"
+         r="30"
+         fill="#4a2c1a" />
+      <circle
+         id="eye-highlight"
+         inkscape:label="高光 Highlight"
+         cx="246"
+         cy="148"
+         r="10"
+         fill="#f3e2c0" />
+    </g>
+    <!-- ===== 5. 任务列表 ===== -->
+    <g
+       id="task-list"
+       inkscape:label="任务列表 Task List"
+       style="display:none">
+      <g
+         id="task-1"
+         inkscape:label="任务 1 Task 1">
+        <rect
+           id="task-1-checkbox"
+           inkscape:label="勾选框 Checkbox (done)"
+           x="116"
+           y="321"
+           width="40"
+           height="40"
+           rx="11"
+           fill="#4a2c1a" />
+        <path
+           id="task-1-check"
+           inkscape:label="完成勾 Check"
+           d="m 126,341 8,9 14,-18"
+           fill="none"
+           stroke="#f3e2c0"
+           stroke-width="7"
+           stroke-linecap="round"
+           stroke-linejoin="round" />
+        <rect
+           id="task-1-bar"
+           inkscape:label="彩条 Bar 1"
+           x="172"
+           y="326"
+           width="224"
+           height="30"
+           rx="15"
+           fill="#e1552b"
+           stroke="#4a2c1a"
+           stroke-width="5" />
+      </g>
+      <g
+         id="task-2"
+         inkscape:label="任务 2 Task 2">
+        <rect
+           id="task-2-checkbox"
+           inkscape:label="勾选框 Checkbox"
+           x="116"
+           y="375"
+           width="40"
+           height="40"
+           rx="11"
+           fill="#f3e2c0"
+           stroke="#4a2c1a"
+           stroke-width="5" />
+        <rect
+           id="task-2-bar"
+           inkscape:label="彩条 Bar 2"
+           x="172"
+           y="380"
+           width="186"
+           height="30"
+           rx="15"
+           fill="#f7c948"
+           stroke="#4a2c1a"
+           stroke-width="5" />
+      </g>
+      <g
+         id="task-3"
+         inkscape:label="任务 3 Task 3">
+        <rect
+           id="task-3-checkbox"
+           inkscape:label="勾选框 Checkbox"
+           x="116"
+           y="429"
+           width="40"
+           height="40"
+           rx="11"
+           fill="#f3e2c0"
+           stroke="#4a2c1a"
+           stroke-width="5" />
+        <rect
+           id="task-3-bar"
+           inkscape:label="彩条 Bar 3"
+           x="172"
+           y="434"
+           width="148"
+           height="30"
+           rx="15"
+           fill="#2a9d8f"
+           stroke="#4a2c1a"
+           stroke-width="5" />
+      </g>
+    </g>
+    <!-- ===== 6. 外框 ===== -->
+    <g
+       id="frame"
+       inkscape:label="外框 Frame"
+       style="display:inline">
+      <rect
+         id="frame-border"
+         inkscape:label="边框 Border"
+         x="6"
+         y="6"
+         width="500"
+         height="500"
+         rx="106"
+         fill="none"
+         stroke="#4a2c1a"
+         stroke-width="11"
+         style="display:inline;opacity:1;mix-blend-mode:overlay" />
+    </g>
+  </g>
+</svg>

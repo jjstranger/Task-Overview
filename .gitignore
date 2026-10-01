@@ -1,0 +1,41 @@
+# ===== 产物 =====
+# 出包产物（43 MB）不进版本库：它是可再生的，而且每次出包都变
+dist/
+build/
+*.spec.bak
+
+# ===== 运行时数据 =====
+# data/ 里是 WebView2 用户数据目录（几 MB~几十 MB 的缓存）、日志、pick.log 等，
+# 属于"这台机器的运行状态"，不是源码。库文件本身也不在这儿（在 NAS 上）。
+data/
+
+# ===== 测试临时产物 =====
+# 冒烟过程的中间文件、调试工作目录、预览页、日志、回传报告
+# 约定：`tests/_diag/_xxx.py` 是**一次性**排查脚本（不提交）；
+# 要长期留着的诊断脚本别带下划线前缀（如 perf_probe.py）
+tests/_diag/_*.py
+tests/_diag/_exe_dbg_work/
+tests/_diag/_exe_dbg/
+tests/_diag/_edge_tmp/
+tests/_diag/_preview_*.html
+tests/_diag/_*.log
+tests/_diag/_*.txt
+tests/_diag/_*.png
+tests/_diag/_smoke_gui_child.txt
+tests/_diag/_smoke_gui.log
+tests/smoke_note.txt
+tools/_build_out.txt
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

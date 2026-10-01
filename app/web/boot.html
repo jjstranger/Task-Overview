@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>天在看 · 选择数据文件</title>
+<link rel="icon" href="../res/icon.png">
+<style>
+:root{
+  --bg:#16161a; --panel:#1e1e24; --panel2:#24242c; --line:#2e2e36;
+  --tx:#e6e6ea; --tx2:#9a9aa5; --tx3:#6b6b76;
+  --blue:#6aa5f8; --amber:#e0a34c; --green:#4caf82; --red:#e05c5c;
+  --sel:rgba(106,165,248,.16);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--tx);user-select:none;
+  font:13px/1.65 "Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  display:flex;flex-direction:column;height:100vh;padding:18px 22px;gap:10px;
+  overflow:auto;   /* 路径特别长时那行说明会多占几行 —— 宁可出滚动条，也不要把页脚裁掉 */
+}
+h1{font-size:16px;font-weight:600}
+h1 span{color:var(--tx3);font-size:12px;font-weight:400;margin-left:8px}
+.lede{color:var(--tx2);font-size:12.5px}
+.lede b{color:var(--tx);font-weight:600}
+.note{color:var(--tx3);font-size:11.5px;word-break:break-all}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.lb{color:var(--tx3);font-size:11.5px;margin-bottom:6px}
+.mono{
+  font-family:Consolas,"Cascadia Mono",monospace;font-size:12px;
+  word-break:break-all;line-height:1.5;user-select:text
+}
+.row{display:flex;gap:8px;align-items:center}
+button{
+  background:transparent;color:var(--tx2);border:1px solid var(--line);
+  border-radius:7px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer;
+  white-space:nowrap
+}
+button:hover{border-color:var(--tx3);color:var(--tx)}
+button.primary{background:var(--sel);border-color:var(--blue);color:var(--blue)}
+button.danger:hover{border-color:var(--red);color:var(--red)}
+input[type=text]{
+  flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+  color:var(--tx);padding:6px 9px;font:inherit;font-size:12px;
+  font-family:Consolas,"Cascadia Mono",monospace;user-select:text
+}
+input[type=text]:focus{outline:none;border-color:var(--blue)}
+#hint{margin-top:8px;color:var(--tx2);font-size:11.5px;line-height:1.5}
+#hint .k{color:var(--tx);font-family:Consolas,"Cascadia Mono",monospace}
+#hint.new .k{color:var(--blue)}
+#hint.have .k{color:var(--green)}
+#hint.bad{color:var(--red)}
+#msg{font-size:12px;min-height:18px}
+#msg.bad{color:var(--red)}
+#msg.good{color:var(--green)}
+.grow{flex:1}
+.acts{display:flex;align-items:center;gap:8px;margin-top:10px}
+.foot{display:flex;align-items:center;gap:10px;color:var(--tx3);font-size:11.5px}
+/* 路径可能很长，宁可省略号也不要在页脚中间断成两行（鼠标悬停有完整路径） */
+.foot .mono{color:var(--tx3);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.busy{opacity:.55;pointer-events:none}
+/* 引导页是"没有任何界面"时唯一露脸的地方，把 logo 摆在这儿 */
+.hd{display:flex;align-items:center;gap:12px}
+.hd img{width:34px;height:34px;display:block;flex:none}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <img src="../res/icon.png" alt="" onerror="this.style.display='none'">
+  <h1>选择数据文件<span>第一次在这台机器上运行，或者原来的位置找不到了</span></h1>
+</div>
+
+<p class="lede">
+  给看板指一个位置就行 —— 那里<b>已经有数据文件就直接用它，没有就在那里新建一个</b>。
+  选完会立即重启看板，之后一直用这个文件。
+  <br>原来那个位置只是<b>暂时连不上</b>（比如 NAS 没开机）的话，直接点下面的「重试原位置」，不用重新选。
+</p>
+<p class="note" id="note"></p>
+
+<div class="box">
+  <div class="lb">数据位置</div>
+  <div class="row">
+    <input type="text" id="path" placeholder="例如 D:\看板数据">
+    <button id="btnPick">浏览…</button>
+  </div>
+  <div id="hint"></div>
+  <div class="acts">
+    <button id="btnApply" class="primary">确定，用这个位置</button>
+    <button id="btnRetry" style="display:none" title="">重试原位置</button>
+    <span class="grow"></span>
+    <button id="btnQuit" class="danger">不设置，退出</button>
+  </div>
+</div>
+
+<div id="msg"></div>
+<div class="grow"></div>
+
+<div class="foot">
+  <span>这次的选择会记在</span>
+  <span class="mono" id="cfg">…</span>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+/* 只动状态类，别整体替换 className —— 那会把 #msg 上将来可能加的基础类一起抹掉 */
+const msg = (t, cls) => {
+  const el = $("#msg");
+  el.textContent = t || "";
+  el.classList.remove("bad", "good");
+  if (cls) el.classList.add(cls);
+};
+
+function bridge(fn, ...a) {
+  const api = window.pywebview && window.pywebview.api;
+  if (!api || typeof api[fn] !== "function") return Promise.resolve({ ok: false, msg: "后端还没就绪，稍后再试" });
+  return Promise.resolve(api[fn](...a)).catch((e) => ({ ok: false, msg: String((e && e.message) || e) }));
+}
+
+function setBusy(on) { document.body.classList.toggle("busy", !!on); }
+
+/* 提示行：这条路径最后会落到哪个文件、是"用现成的"还是"新建"。
+   用户不用去分辨目录和文件，看一眼这行就知道会发生什么。 */
+let probeSeq = 0;
+async function refresh() {
+  const p = $("#path").value.trim();
+  const el = $("#hint");
+  /* ⚠ ++probeSeq 必须在**空值早退之前**：以前的写法是清空输入框时直接 return，
+     序号没变，于是上一次在途的 probe 回来时 `seq === probeSeq` 仍然成立，
+     会把**旧路径**的提示写回已经清空的框里（看着像程序记错了你填的东西）。 */
+  const seq = ++probeSeq;
+  if (!p) { el.textContent = ""; el.className = ""; return; }
+  const r = await bridge("probe", p);
+  if (seq !== probeSeq) return;                 // 打字快过返回，只认最后一次
+  if (!r || !r.ok) { el.textContent = (r && r.msg) || "这条路径用不了"; el.className = "bad"; return; }
+  el.className = r.exists ? "have" : "new";
+  el.innerHTML = (r.exists ? "✓ 这里已经有数据文件，会直接读取：" : "＋ 这里还没有数据文件，会新建：")
+    + '<span class="k"></span>';
+  el.querySelector(".k").textContent = r.path;   // textContent 赋值，别拼进 innerHTML
+}
+
+async function loadInfo() {
+  const r = await bridge("info");
+  if (!r || !r.ok) { msg((r && r.msg) || "读不到启动信息", "bad"); return; }
+  $("#cfg").textContent = r.config;
+  $("#cfg").title = r.config;
+  $("#path").value = r.dir;
+  const bits = [];
+  if (r.tried) bits.push("上次找的位置：" + r.tried);
+  if (r.reason) bits.push("原因：" + r.reason);
+  $("#note").textContent = bits.join("　·　");
+  /* 原位置还在的话给「重试」——网络位置的毛病常常是临时的
+     （NAS 刚开机 / 笔记本换了个网络），这时候什么都不用改，再试一次就行。 */
+  if (r.can_retry) {
+    const b = $("#btnRetry");
+    b.style.display = "";
+    b.title = "重新试一次原位置：" + (r.tried || "");
+  }
+  refresh();
+}
+
+$("#btnPick").onclick = async () => {
+  setBusy(true);
+  const r = await bridge("pick_folder", $("#path").value || "");
+  setBusy(false);
+  if (!r || !r.ok) { msg((r && r.msg) || "打不开选择窗口", "bad"); return; }
+  if (!r.path) return;                          // 用户取消
+  $("#path").value = r.path;
+  msg("");
+  refresh();
+};
+
+$("#btnApply").onclick = async () => {
+  const p = $("#path").value.trim();
+  if (!p) { msg("先填一个位置", "bad"); return; }
+  setBusy(true);
+  msg("正在检查这个位置…");
+  const r = await bridge("apply", p);
+  setBusy(false);
+  if (!r || !r.ok) { msg((r && r.msg) || "这个位置用不了", "bad"); return; }
+  msg((r.exists ? "找到现成的数据文件，正在重启看板…" : "已记下，正在那里新建并重启看板…"), "good");
+};
+
+$("#btnRetry").onclick = async () => {
+  setBusy(true);
+  msg("再试一次原位置…");
+  const r = await bridge("retry");
+  setBusy(false);
+  if (!r || !r.ok) { msg((r && r.msg) || "还是连不上", "bad"); return; }
+  msg("原位置可以用了，正在重启看板…", "good");
+};
+
+$("#btnQuit").onclick = () => bridge("quit_app");
+
+$("#path").addEventListener("input", refresh);
+$("#path").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btnApply").click(); });
+
+if (window.pywebview && window.pywebview.api) loadInfo();
+else window.addEventListener("pywebviewready", loadInfo);
+</script>
+</body>
+</html>

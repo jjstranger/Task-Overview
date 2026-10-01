@@ -24,7 +24,10 @@ from models import Board  # noqa: E402
 from version import (  # noqa: E402
     AUMID, APP_NAME, TITLE, VERSION, VERSION_LINE, tray_tip)
 
-EXE = r"~\.workbuddy\binaries\python\envs\board\Scripts\python.exe"
+# ⚠ 必须 expanduser：subprocess 传给 CreateProcess 的是原样字符串，**不展开 `~`**，
+# 写成 `~\.workbuddy\...` 会直接 WinError 2。（2026-10-01 实测踩到）
+EXE = os.path.join(os.path.expanduser("~"), ".workbuddy", "binaries", "python",
+                   "envs", "board", "Scripts", "python.exe")
 NOTE = os.path.join(ROOT, "tests", "smoke_note.txt")
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_smoke_gui.log")
 CHILD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_smoke_gui_child.txt")

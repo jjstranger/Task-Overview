@@ -31,17 +31,17 @@
 1. 浏览器打开 **https://github.com/settings/keys**
    （进去后选页面左侧的 **SSH and GPG keys** 标签）
 2. 点右上角的绿色按钮 **New SSH key**
-3. **Title** 填：`personal-board`（随便填，方便以后一眼认出是哪个）
+3. **Title** 填：`Task-Overview`（随便填，方便以后一眼认出是哪个）
 4. **Key type** 保持默认 **Authentication Key** 不动
 5. **Key** 那个大框里，粘贴下面**这一整行**（整行复制，不含我这两个反引号）：
 
    ```
-   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIsWaWQwbRTr9HAQ2sRcsuYz0BcEtweHdLOSR1W2PSyh personal-board
+   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIsWaWQwbRTr9HAQ2sRcsuYz0BcEtweHdLOSR1W2PSyh Task-Overview
    ```
 
    粘贴小提示：
    - 只粘这一行，**不要回车换行**、不要加引号；
-   - 这一行内部有**两个空格**（`ssh-ed25519` 与 `AAAAC…` 之间、`AAAAC…` 与 `personal-board` 之间），直接整体复制就带上了；
+   - 这一行内部有**两个空格**（`ssh-ed25519` 与 `AAAAC…` 之间、`AAAAC…` 与 `Task-Overview` 之间），直接整体复制就带上了；
    - 如果框里已有内容，先清空再粘。
 6. 点 **Add SSH key**
 7. 完成提示：GitHub 会给你发一封邮件（"Added new SSH key"），收到即成功。
@@ -57,7 +57,7 @@
 1. 打开 **https://github.com/new**
 2. **Repository name** 填：`Task-Overview`
 
-   > 注意区分两个名字：本地源码工程目录也叫 `personal-board`，那是**这台机器上的目录**；
+   > 注意区分两个名字：本地源码工程目录也叫 `Task-Overview`，那是**这台机器上的目录**；
    > GitHub 上的仓库名是 `Task-Overview`。两个名字不冲突，但别搞混——
    > 建错仓库名，脚本推上去会报 `repository not found`。
 3. 可见性选 **Public**（⚠️ 一旦选了就是全公开，所以下面第 5 步很重要）
@@ -99,7 +99,7 @@ python tools/publish_github.py git@github.com:<你的用户名>/Task-Overview.gi
 1. **验主机钥匙**：`ssh-keyscan` 把 github.com 的钥匙写进 `~/.ssh/known_hosts`
    （不做这步 git 会卡在 `Host key verification failed`；跑不通才临时关校验）
 2. **导出源码**：从本地仓库 `git ls-files` 拿当前入库清单（此刻正好是脱敏后的 51 个文件）
-3. **复制**到 `…/WorkBuddy_Workspace/2026-09-25-04-38-26/github/personal-board`
+3. **复制**到 `…/WorkBuddy_Workspace/2026-09-25-04-38-26/github/Task-Overview`
    —— 放在工程目录**外面**，避开本机"删除兜底会掐断整条命令"的坑，也和开发/打包彻底隔离
 4. **推前自检**（🔴 防线）：扫描目标目录所有文件，命中以下几类关键字
    （网络盘共享目录名 / Windows 用户名 / 本机 NAS 主机名 / 内网 IP / 客户名）
@@ -150,14 +150,14 @@ DEFAULT_DB_PATH = r"S:<共享目录>\T_T_Data\board.sqlite"
 
 ## 四、推完之后
 
-- **本地开发照旧**：本地那个 `personal-board` 源码工程原封不动，继续开发、继续 `tools/build_exe.py`。
+- **本地开发照旧**：本地那个 `Task-Overview` 源码工程原封不动，继续开发、继续 `tools/build_exe.py`。
   推到 GitHub 的只是它的一份**导出副本**，两边互不影响。
 - **以后更新代码**：本地改完 → `tools/ver.py save "说明"` → 再跑一次
   ```
   python tools/publish_github.py git@github.com:<用户>/Task-Overview.git
   ```
   第二次跑是**增量同步**：自动覆盖变更、自动 commit、自动推，不用重建仓库。
-- **目标工作副本**在 `github/personal-board`（工程目录外），脚本第二次跑会复用它。
+- **目标工作副本**在 `github/Task-Overview`（工程目录外），脚本第二次跑会复用它。
 
 ---
 
@@ -177,7 +177,7 @@ DEFAULT_DB_PATH = r"S:<共享目录>\T_T_Data\board.sqlite"
 
 - 这个 SSH key 是**无口令**的（为了自动化推）。之后想加保护：
   `ssh-keygen -p -f ~/.ssh/id_ed25519`，但那样新会话里我的推送脚本会卡在密码提示上。
-- 别拿这个 key 去推别的仓库/账号，它是专给 `personal-board` 用的（comment 已标 `personal-board`）。
+- 别拿这个 key 去推别的仓库/账号，它是专给 `Task-Overview` 用的（comment 已标 `Task-Overview`）。
 
 ---
 
@@ -190,7 +190,7 @@ DEFAULT_DB_PATH = r"S:<共享目录>\T_T_Data\board.sqlite"
          ↓
 [我]  python tools/publish_github.py git@github.com:<你>/Task-Overview.git
          · keyscan 主机钥匙
-         · 导出脱敏源码文件 → github/personal-board
+         · 导出脱敏源码文件 → github/Task-Overview
          · 推前敏感串自检（不干净就中止）
          · git init + 1 次提交
          · SSH 推送，失败 4 次退避重试

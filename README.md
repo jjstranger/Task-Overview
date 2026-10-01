@@ -56,7 +56,7 @@ python tools\build_exe.py --outdir X   # 出到别的目录做对照构建
 
 - **默认 onedir**：pywebview 靠 pythonnet 加载 `webview/lib` 里的 .NET 程序集，DLL 躺在 exe 旁边最稳；
   onefile 每次启动都要解包几十 MB 到临时目录，启动慢且更容易出问题
-- 优先用 ASCII 名 `ProjectBoard` 构建、出包后再落位成正式名（取自 `app/version.py` 的 `EXE_STEM`）
+- 优先用 ASCII 名 `Task-Overview` 构建、出包后再落位成正式名（取自 `app/version.py` 的 `EXE_STEM`）
 - **打包不删旧产物**：已存在的那份改名成 `.prev-<时间戳>` 让位，确认新版没问题后自己清理
 
 ## 打 zip 给别人

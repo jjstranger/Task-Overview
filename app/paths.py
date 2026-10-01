@@ -2,10 +2,10 @@
 
 | | 源码运行 | 打包后（onedir / onefile） |
 | --- | --- | --- |
-| 代码 | `personal-board/app/*.py` | 解包到 `_MEIPASS` |
+| 代码 | `Task-Overview/app/*.py` | 解包到 `_MEIPASS` |
 | `web/` 只读资源 | `app/web/` | `_MEIPASS/web/`（打进包） |
 | `res/` 图标 | `app/res/` | `_MEIPASS/res/`（打进包） |
-| `data/` 可写目录 | `personal-board/data/` | exe 同级的 `data/` |
+| `data/` 可写目录 | `Task-Overview/data/` | exe 同级的 `data/` |
 | 日志 / 备份 / 快照 | 同上 | 同上 |
 
 **判据只用 `sys.frozen`，不能用 `__file__` 猜**：onefile 模式下 `__file__` 指向临时解包目录，

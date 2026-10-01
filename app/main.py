@@ -246,7 +246,7 @@ def start_tray(window, on_quit, on_checkin, on_open_data, tip=""):
         pystray.MenuItem("打开数据目录", lambda: on_open_data()),
         pystray.MenuItem("退出", lambda: on_quit()),
     )
-    icon = pystray.Icon("ProjectBoard", tray_icon(), tip or TITLE, menu)
+    icon = pystray.Icon("Task-Overview", tray_icon(), tip or TITLE, menu)
     threading.Thread(target=icon.run, daemon=True).start()
     return icon
 

@@ -30,7 +30,7 @@ BOOT_TITLE = f"{APP_NAME} · 选择数据文件"
 VERSION_LINE = f"v{VERSION} · {RELEASE_DATE} 发布"
 
 # 打包产物的名字（exe 文件名与 onedir 目录名，两者同名）：`天在看`。
-# 构建时仍用 ASCII 名 `ProjectBoard`（PyInstaller 对非 ASCII 名不稳），
+# 构建时仍用 ASCII 名 `Task-Overview`（PyInstaller 对非 ASCII 名不稳），
 # 出包后由 tools/build_exe.py 落位成这个名字。
 # 早期版本后缀还带着英文名（长长一串 exe 名），太啰嗦，
 # 2026-10-01 起按用户口径简化成光一个品牌名。

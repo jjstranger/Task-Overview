@@ -19,7 +19,7 @@ onedir 下这些 DLL 就躺在 exe 旁边，最稳。要单文件再显式 `--on
 ## 名字里的中文
 
 PyInstaller 的 `--name` 直接喂中文会在 build 目录里造一堆中文路径，历史上踩过坑。
-所以**统一用 ASCII 名 `ProjectBoard` 构建，出包后再落位**成正式名
+所以**统一用 ASCII 名 `Task-Overview` 构建，出包后再落位**成正式名
 （`version.EXE_STEM`，2026-10-01 起就叫 `天在看`）。
 PyInstaller 6 的 onedir 布局里配套目录固定叫 `_internal`、不随 exe 名走，改名是安全的。
 
@@ -53,7 +53,7 @@ sys.path.insert(0, APP)
 import paths  # noqa: E402    web/ 与 icon.ico 的落点只有它说了算（别在这儿再拼一份）
 from version import EXE_STEM  # noqa: E402  产物名的唯一来源（见 app/version.py）
 
-BUILD_NAME = "ProjectBoard"        # 构建用 ASCII 名（PyInstaller 不吃中文名）
+BUILD_NAME = "Task-Overview"        # 构建用 ASCII 名（PyInstaller 不吃中文名）
 FINAL_NAME = EXE_STEM               # 出包后的正式名：天在看
 
 
@@ -141,17 +141,17 @@ def main() -> int:
     #     而网络盘上删除是被禁的（safe-delete 无回收站 → FAIL_CLOSED），同样挂
     # 这两个跟源码没有半点关系，放本地既省事又更快。
     workpath = os.path.abspath(args.workpath) if args.workpath \
-        else os.path.join(tempfile.gettempdir(), "ProjectBoard_build")
+        else os.path.join(tempfile.gettempdir(), "Task-Overview_build")
     specpath = workpath
     os.makedirs(workpath, exist_ok=True)
     # ⚠ distpath **也**放本地临时目录，不要直接给 outdir（2026-10-01 踩到）：
-    #   PyInstaller 的 COLLECT 会先把已存在的 `<distpath>\ProjectBoard` 整个删掉重来
+    #   PyInstaller 的 COLLECT 会先把已存在的 `<distpath>\Task-Overview` 整个删掉重来
     #   （实测 160 个对象），而环境的安全删除兜底是**按轮累计**的 —— 超阈值就要逐次确认，
     #   拦下来会**直接掐掉整条命令**（exit=1）。症状：已经构建好的 exe 白做，
     #   报告只在最后一行留一句 SAFE_DELETE_BULK_CONFIRM_REQUIRED，看着像打包自己炸了。
     #   放 TEMP 之后 PyInstaller 永远不碰 dist\，落位统一由 [3/4] 的「复制+删原」来做。
     stage = os.path.abspath(args.stagepath) if args.stagepath \
-        else os.path.join(tempfile.gettempdir(), "ProjectBoard_dist")
+        else os.path.join(tempfile.gettempdir(), "Task-Overview_dist")
     os.makedirs(stage, exist_ok=True)
     cmd = [
         sys.executable, "-m", "PyInstaller",

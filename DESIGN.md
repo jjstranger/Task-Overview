@@ -50,7 +50,7 @@
 > 记录"当时为什么这么做"，里面的描述可能已经变了 —— 结构与表清单以本节和代码为准。
 
 ```
-personal-board/
+Task-Overview/
 ├── app/
 │   ├── main.py       入口：建窗口、托盘、看门狗、调度器装配
 │   ├── _boot.py      启动外壳：崩溃兜底写日志、孤儿锁清理、设 WebView2 profile
@@ -700,7 +700,7 @@ GUI 新增 7 项断言，其中「拖拽排序真的落库」是**真调了一�
 | | 源码 | 打包后 |
 | --- | --- | --- |
 | 只读资源 `web/` | `app/web/` | `sys._MEIPASS/web/`（打进包） |
-| 可写 `data/`、日志、WebView2 profile | `personal-board/data/` | **exe 同级** `data/` |
+| 可写 `data/`、日志、WebView2 profile | `Task-Overview/data/` | **exe 同级** `data/` |
 
 判据只用 `sys.frozen`，不用 `__file__` 猜。`data/` 落到解包临时目录是这类打包最典型的错：
 WebView2 profile 每次启动都是新的，而且被强杀时污染的是没法清理的临时目录。

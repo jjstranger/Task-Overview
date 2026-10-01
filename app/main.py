@@ -329,7 +329,7 @@ def main() -> int:
     net_bad = paths.preflight(db_path)
     if net_bad:
         if args.smoke:
-            _append_log(f"smoke: 数据位置预检不通过，跳过引导页：{net_bad}")
+            _append_log(f"smoke: 数据存放路径预检不通过，跳过引导页：{net_bad}")
             return 2
         paths.log_line("boot.log", f"预检不通过，不去碰这个路径：{net_bad}（{db_path}）")
         return boot.run_boot(net_bad, db_path)

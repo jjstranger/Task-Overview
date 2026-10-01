@@ -22,9 +22,10 @@ RELEASE_DATE = "2026-09-30"               # 这一版的发布日期（YYYY-MM-D
 # 标题栏：`天在看 - Travail Task Overview v1.1`
 TITLE = f"{APP_NAME} - {APP_NAME_EN} v{VERSION}"
 
-# 引导页（选数据文件）是**另一个窗口**，标题必须跟主窗口不一样，
+# 引导页（指定数据文件存放路径）是**另一个窗口**，标题必须跟主窗口不一样，
 # 不然按标题找窗口的代码（冒烟、置顶、单实例）会把两个窗口认混。
-BOOT_TITLE = f"{APP_NAME} · 选择数据文件"
+# ⚠ 页面 <title> 与 h1 跟着这里的文案走，改名字三处一起改。
+BOOT_TITLE = f"{APP_NAME} · 指定数据文件存放路径"
 
 # 设置页「版本」那一栏显示的内容
 VERSION_LINE = f"v{VERSION} · {RELEASE_DATE} 发布"

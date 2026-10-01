@@ -17,7 +17,7 @@ r"""数据路径用不了时，真的会弹引导页（而不是一句话报错�
   归一规则，直接打 `boot.describe_target()`。这是本次简化的核心，
   窗口测试反而验不到它（要真点对话框）。顺带验网络预检
   （`paths.preflight` / `check_db_target` 都不会去碰连不上的网络位置）。
-- **A 引导页**：`--db` 指一个**不存在的盘** → 必须出现标题带「选择数据文件」的窗口，
+- **A 引导页**：`--db` 指一个**不存在的盘** → 必须出现标题带「指定数据文件存放路径」的窗口，
   并且 `data/boot.log` 里要出现「引导页已就绪」——只断言"窗口出现了"是不够的，
   白窗口和能点的窗口在外部看一模一样（这条教训来自那次 TDZ：页面渲染全炸，
   可是窗口、句柄、标题全都正常）。关掉窗口后进程要能退出。
@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.join(ROOT, "app"))
 from version import APP_NAME, TITLE as MAIN_TITLE  # noqa: E402
 
 KEYWORD = APP_NAME        # 找"含这个字样的窗口"时用的关键词（子串匹配）
-BOOT_TITLE_HINT = "选择数据文件"
+BOOT_TITLE_HINT = "指定数据文件存放路径"
 APP = os.path.join(ROOT, "app", "main.py")
 PY = sys.executable
 
@@ -92,7 +92,7 @@ def windows():
 
 
 def find_title(sub):
-    """子串匹配。⚠ 引导页标题里也含产品名（`天在看 · 选择数据文件`）——
+    """子串匹配。⚠ 引导页标题里也含产品名（`天在看 · 指定数据文件存放路径`）——
     所以找主窗口必须用 exact_title()，否则永远"两个都找到了"。"""
     for hwnd, t in windows():
         if sub in t:
@@ -370,7 +370,7 @@ def phase_b():
 
 
 def phase_c():
-    """数据位置是**连不上的网络共享**时，启动必须快（这是"读不到库时启动很慢"那一改）。"""
+    """数据存放路径是**连不上的网络共享**时，启动必须快（这是"读不到库时启动很慢"那一改）。"""
     print("\n[C] 网络位置连不上 → 不碰它、直接进引导页，而且要快")
     bad = r"\\192.0.2.1\share\__no_such_dir__\board.sqlite"   # 保留地址，必然连不上
     mark = log_size()

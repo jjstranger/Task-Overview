@@ -3,6 +3,8 @@
   --tx:#e6e6ea; --tx2:#9a9aa5; --tx3:#6b6b76;
   --blue:#6aa5f8; --amber:#e0a34c; --green:#4caf82; --red:#e05c5c; --purple:#a99bf2; --gray:#6b6b76;
   --sel:rgba(106,165,248,.16);
+  /* main 的上内边距。批量条要用它来算 sticky 偏移，所以提成变量别让它有两份 */
+  --pad-t:10px;
   --h0:#202027; --h1:#0e4429; --h2:#006d32; --h3:#26a641; --h4:#39d353;
 }
 body.light{
@@ -72,7 +74,7 @@ header button.icon svg.spin{animation:spin .55s cubic-bezier(.4,0,.2,1)}
 /* 设置页的说明文字都收进了 title：把光标换成问号形状，让人知道这儿能停一下 */
 .lb[title]{cursor:help}
 
-main{flex:1;padding:10px 12px;overflow:auto}
+main{flex:1;padding:var(--pad-t) 12px;overflow:auto}
 /* 三个页面容器不强制 height:100%：内容多高就多高。
    之前强制撑满 main，再加上面还有一行筛选栏，内容再短也凭空多出一条滚动空间。 */
 #heat,#fin{display:none;padding:6px 2px}
@@ -120,11 +122,17 @@ footer{display:flex;gap:16px;padding:7px 14px;border-top:1px solid var(--line);b
 
 /* max-height + 滚动：筛选菜单加了「环节状态 / 制作人」两组后能有二十来项，
    不设上限会顶出屏幕（定位里怎么算都是负值，菜单就跑到窗口外面去了） */
-.popup{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px;z-index:100;min-width:150px;max-height:70vh;overflow:auto;box-shadow:0 8px 26px rgba(0,0,0,.45)}
+/* z-index 300：**必须高于 .ov 的 200**。客户弹窗里那颗 ⋯ 菜单是第一个挂在弹窗内部的
+   popup（以前那些都挂主界面），老值 100 会让它画在遮罩底下 —— 看着像"点了三点没反应"。
+   也不能高过 400（#ovBlock 启动遮罩），那层要把一切盖住。 */
+.popup{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px;z-index:300;min-width:150px;max-height:70vh;overflow:auto;box-shadow:0 8px 26px rgba(0,0,0,.45)}
 .popup div{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap}
 .popup div:hover{background:var(--panel2)}
 .popup div.sep{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .popup div.dim{color:var(--tx3)}
+/* 破坏性动作（删除客户这类）染红：菜单里跟其他项长得一样的话，
+   手快点下去就没了 —— 这一眼能看出来比"点了再读确认框"便宜。 */
+.popup div.danger{color:var(--red)}
 /* 子环节筛选框顶上的搜索框：打字即时筛，弹层不关 */
 .popup input.psearch{display:block;width:100%;margin:2px 0 5px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--tx);font:inherit;font-size:12px;outline:none}
 .popup input.psearch:focus{border-color:var(--blue)}
@@ -159,6 +167,19 @@ footer{display:flex;gap:16px;padding:7px 14px;border-top:1px solid var(--line);b
 .fld .lb{width:86px;color:var(--tx2);flex:none}
 .fld .vl{flex:1;color:var(--tx3);font-size:11px;word-break:break-all}
 input[type=text],input[type=date],input[type=time]{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12px;width:100%}
+/* 截止日期：原生 date 框在中文下空值时画的是「yyyy/mm/日」。那段文字在 UA shadow DOM 里，
+   页面拿不到也改不了（lang 属性实测无效），只能让它**空值且未聚焦**时透明，
+   再用自绘的 .dph 顶上 —— 日历图标不受影响，仍在框右边。
+   ⚠ 有值时不能透明：那时原生画的就是 2026/12/31，正是要的格式。
+   ⚠ 聚焦时也不能透明：用户正打字，得看得见自己输的数字。
+   ⚠ 想从 JS 验这条规则是做不到的：外链样式表在 file:// 下读 cssRules 抛 SecurityError，
+     而 getComputedStyle(el,"::-webkit-datetime-edit") 返回的是**元素自身**样式（实测），
+     会永远"看着对"。所以"透明真生效"只靠截图验：tests/_diag/check_datefield.py。 */
+.dwrap{position:relative}
+.dwrap .dph{position:absolute;left:9px;top:50%;transform:translateY(-50%);
+  font-size:12px;color:var(--tx3);pointer-events:none;display:none}
+#newDl:not(.hav):not(:focus)::-webkit-datetime-edit{color:transparent}
+#newDl:not(.hav):not(:focus) ~ .dph{display:block}
 input.w{width:60px}
 .hint{font-size:11px;color:var(--tx3);line-height:1.5}
 .hint code,.prev code{background:var(--rowalt);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:11px}
@@ -176,6 +197,23 @@ input.w{width:60px}
 .prev .tag.new{border-color:var(--blue);color:var(--blue)}
 .prev .tag.dup{opacity:.5;text-decoration:line-through}
 .closebar{text-align:right;margin-top:14px;display:flex;gap:8px;justify-content:flex-end}
+
+/* 导出选项弹窗：项目多选列表 + 内容勾选。位置和文件名不在这儿挑，
+   由系统「另存为」对话框负责（见 app/api.py 的 finance_export_save）。 */
+.acts{display:flex;gap:6px}
+.acts button{padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--tx2);font:inherit;font-size:11px;cursor:pointer}
+.acts button:hover{border-color:var(--blue);color:var(--blue)}
+#exPrjList{max-height:148px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
+#exPrjList label{display:flex;align-items:center;gap:6px;padding:3px 8px;font-size:11.5px;cursor:pointer}
+#exPrjList label:hover{background:var(--rowalt)}
+#exPrjList label .g{color:var(--tx3);font-size:11px;margin-left:auto}
+#exSecs{display:flex;flex-wrap:wrap;gap:4px 16px}
+#exSecs label{display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer}
+/* CSV 时其它三项禁用（后端也只导明细）：灰掉而不是藏起来 ——
+   「为什么没有项目汇总」比「这一项灰着」更难解释 */
+#exSecs label.off{opacity:.45;cursor:default}
+#exRange{max-width:200px}
+.exdate{max-width:150px;flex:none}
 .empty{color:var(--tx3);font-size:12px;padding:18px 4px;text-align:center}
 .err{color:var(--red);font-size:11px}
 
@@ -277,12 +315,28 @@ input.w{width:60px}
 #treeBar button{font-size:11px;padding:3px 9px}
 
 /* 多选批量条：只在多选模式下出现，紧贴筛选栏下方（issue #3） */
-#bulkBar{display:none;align-items:center;gap:7px;margin:-2px 0 6px;padding:5px 8px;
-  border:1px solid var(--blue);border-radius:8px;background:var(--panel2)}
-#bulkBar button{font-size:11px;padding:3px 9px}
-#bulkBar .cnt{font-size:11px;color:var(--tx3);margin-right:2px}
-/* 操作提示：告诉用户有三种点法（Ctrl / Shift），不然发现不了 */
-#bulkBar .hint{font-size:10.5px;color:var(--tx3);margin-right:auto;
+/* flex-wrap：按钮从 2 个涨到 4 个之后，窄窗口下不换行会把「清空/退出」挤出可视区 */
+/* 多选批量条：粘在内容区顶部，树滚多远它都留在原地。
+   main 才是滚动容器（overflow:auto），批量条是它的**直接子元素**，所以 sticky 生效。
+   ⚠ z-index 不能省：sticky 不脱离文档流，后面滚上来的行在 DOM 里排它后面，
+   优先级天生在它之上 —— 不给 z-index 就是"条被行盖住"，点按钮点到背后的行。
+   （.popup 的 z-index 是 300，所以下拉菜单照样盖在它上面。）
+   ⚠ top 要用负的内边距：sticky 停的是**内容盒**顶部而不是可视区顶部，
+   照默认值会留一条 10px 的缝，滚动的行从这条缝里溜到按钮上方，看着像漏 Ui。 */
+#bulkBar{position:sticky;top:calc(-1 * var(--pad-t));z-index:6;display:none;align-items:center;
+  flex-wrap:wrap;gap:7px;margin:-2px 0 6px;padding:5px 8px;
+  border:1px solid var(--blue);border-radius:8px;background:var(--panel2);
+  box-shadow:0 4px 12px rgba(0,0,0,.3)}
+#bulkBar button{font-size:11px;padding:3px 9px;flex:none}
+#bulkBar .cnt{font-size:11px;color:var(--tx3);margin-right:2px;flex:none}
+/* 操作提示：只占**一行**、短句，剩下的空间全让给按钮。
+   ⚠ flex-basis 必须是 0 不是 auto：换行是按 flex-basis 算的，用 auto 时浏览器先按
+   「完整文案宽度」判断一行放不下，把按钮整排推到第二行，之后 hint 才收缩 ——
+   结果就是「清空 / 退出多选」掉到第二行（2026-10-03 用户报）。给 0 它才肯当软柿子，
+   配合按钮上的 flex:none，收缩全由提示承担。
+   min-width:0 是 flex 子项能收缩的前提，光写 overflow:hidden 不生效。 */
+#bulkBar .hint{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;font-size:10.5px;color:var(--tx3);
   padding-left:8px;border-left:1px solid var(--line)}
 /* 勾上的行整条淡蓝底，一眼看出批量操作会作用到哪些 */
 .row.picked{background:var(--sel)}

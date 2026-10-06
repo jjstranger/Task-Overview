@@ -168,6 +168,29 @@ async function diagReport() {
       catKeys: Array.from(document.querySelectorAll("#segCat button")).map((b) => b.dataset.c),
       catAct: n("#segCat button.act"),
       date: ($("#newPaidDate").value || "").length,
+      /* 截止日期：**原生 date 框**（要日历选择器）+ 空值时自绘的 YYYY/MM/DD。
+         ⚠ 原生框空值时画的是「yyyy/mm/日」，页面改不了（lang 属性实测无效、placeholder 无效），
+           只能把那段 mask 设成透明、自己顶一个占位 —— 所以这里查的是**自绘那行**
+           （#newDlPh），不是 input 的 placeholder（那属性对 date 框本来就是摆设）。
+         ⚠ "透明真生效"在这里验不了：外链样式表在 file:// 下读 cssRules 抛 SecurityError，
+           而 getComputedStyle(el,"::-webkit-datetime-edit") 返回的是**元素自身**样式（实测），
+           永远"看着对"。那条只能靠截图验，见 tests/_diag/check_datefield.py。 */
+      dueType: ($("#newDl") || {}).type || "",
+      duePh: ($("#newDlPh") || {}).textContent || "",
+      duePhShown: (() => {
+        const e = $("#newDlPh");
+        return !!e && getComputedStyle(e).display !== "none";
+      })(),
+      /* 自绘占位盖在 input 上，少了 pointer-events:none 就点不开日历 —— 占位中心点上
+         必须是 input 自己（elementFromPoint 是唯一能逮住"被挡住"的判据） */
+      duePhHit: (() => {
+        const e = $("#newDlPh");
+        if (!e) return null;
+        const b = e.getBoundingClientRect();
+        if (!b.width) return null;
+        const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        return hit ? (hit.id || hit.className || hit.tagName) : null;
+      })(),
       /* 精简版面（2026-09-30 用户要求）：新建页那句说明撤了，客户栏的提示也撤了，
          名称框的占位符换成「输入项目名，可用中文。」 */
       subGone: !document.querySelector("#ovNew .sub"),
@@ -515,6 +538,62 @@ async function diagReport() {
         return items;
       })(),
     };
+  });
+
+  /* 导出选项弹窗（#ovExport）：格式 / 时间范围 / 项目 / 内容 + 文件名预览。
+     ⚠ 只验界面，**绝不点「导出…」（#exOk）** —— 它会弹系统模态对话框，
+     无人值守时整轮冒烟会一直卡在等点击。要验那条路只能另开线程去关窗口
+     （tests/_diag/smoke_export_save.py）。 */
+  await phase("export", 15000, async () => {
+    await step("export");
+    openExport();
+    await wait(600);
+
+    const rep0 = $("#exPrev").dataset || {};
+    const out = {
+      dlg: getComputedStyle($("#ovExport")).display !== "none",
+      fmtBtns: Array.from(document.querySelectorAll("#exFmt button")).map((b) => b.dataset.f),
+      fmtAct: (document.querySelector("#exFmt button.act") || { dataset: {} }).dataset.f || "",
+      secs: Array.from(document.querySelectorAll("#exSecs input")).map((el) => el.dataset.s),
+      secsOn: Array.from(document.querySelectorAll("#exSecs input"))
+        .filter((el) => el.checked).map((el) => el.dataset.s),
+      rangeOpts: Array.from(document.querySelectorAll("#exRange option")).map((o) => o.textContent),
+      /* 默认「同当前筛选」得把年份写出来，不能只有"当前"两个字 */
+      curLabel: (document.querySelector('#exRange option[value="cur"]') || {}).textContent || "",
+      planName: rep0.name || "",
+      planCount: rep0.count || "",
+      prjClosed: getComputedStyle($("#exPrjBox")).display === "none",
+      prjN: n("#exPrjList input"),
+    };
+
+    /* 自定义范围：两个日期框才出现 */
+    $("#exRange").value = "custom";
+    $("#exRange").dispatchEvent(new Event("change"));
+    await wait(300);
+    out.datesShown = getComputedStyle($("#exFrom")).display !== "none" &&
+                     getComputedStyle($("#exTo")).display !== "none";
+
+    /* 指定项目：复选列表展开、默认全勾 */
+    $("#exPrj").value = "1";
+    $("#exPrj").dispatchEvent(new Event("change"));
+    await wait(300);
+    out.prjShown = getComputedStyle($("#exPrjBox")).display !== "none";
+    out.prjOn = Array.from(document.querySelectorAll("#exPrjList input"))
+      .filter((el) => el.checked).length;
+
+    /* 切 CSV：内容固定成「款项明细」，其余三项灰掉（后端也会这么兜） */
+    document.querySelector('#exFmt button[data-f="csv"]').click();
+    await wait(600);
+    out.csvOn = Array.from(document.querySelectorAll("#exSecs input"))
+      .filter((el) => el.checked).map((el) => el.dataset.s);
+    out.csvOff = Array.from(document.querySelectorAll("#exSecs input"))
+      .filter((el) => el.disabled).length;
+    out.csvName = ($("#exPrev").dataset || {}).name || "";
+
+    modal("#ovExport", false);
+    await wait(200);
+    out.closed = getComputedStyle($("#ovExport")).display === "none";
+    rep.export = out;
   });
 
   /* L3 全屏遮挡能否拉起来 */
@@ -945,6 +1024,7 @@ async function diagReport() {
       const bAll = rowsOfB().length;
       const hasBtn = !!fltOf();
       let hasInput = false, txtShown = 0, txtHit = false, txtTrimmed = false;
+      let txtRows = [], txtNoLeak = null, txtExpN = 0;
       /* 1) 搜索框：打标题里的两个字，这一层要真的少掉几行，且目标还在 */
       if (hasBtn) {
         const want = (pBnow.children[0] || {}).title || "";
@@ -961,6 +1041,16 @@ async function diagReport() {
           txtShown = rows.length;
           txtHit = rows.some((el) => ((el.querySelector(".title") || {}).textContent || "") === want);
           txtTrimmed = rows.length > 0 && rows.length < bAll;
+          txtRows = rows.map((el) => ((el.querySelector(".title") || {}).textContent || ""));
+          /* ⚠ 条件必须压到**深层**：只命中「第一环节」时，「子任务」不许跟着露出来
+             （它自己不含关键字、也没有含关键字的后代）。选中判断沿用后端那套
+             「自己命中 or 子孙有命中」—— 父环节要留着当路径，别的都该走。 */
+          const q = want.slice(0, 2).toLowerCase();
+          const deepHit = (x) => String((x || {}).title || "").toLowerCase().indexOf(q) >= 0
+            || ((x || {}).children || []).some(deepHit);
+          const cnt = (ns) => (ns || []).forEach((x) => { if (deepHit(x)) txtExpN += 1; cnt(x.children); });
+          cnt(pBnow.children);
+          txtNoLeak = rows.length === txtExpN;
           inp.value = "";                      // 还原
           inp.dispatchEvent(new Event("input"));
           await wait(250);
@@ -1086,11 +1176,15 @@ async function diagReport() {
         await wait(300);
         nfMulti.afterClr = (nfCur().st || null);
 
-        /* ④ 制作人组：勾一个 → 反选 → 应当正好是其余的人 */
+        /* ④ 制作人组：勾一个 → 反选 → 补集里**必须带上「未分配」**。
+              用户 2026-10-04 报的：反选完，所有还没派人的环节一起被吞了 ——
+              因为"未分配"以前根本不是可选项，补集只从真制作人里凑得出来。
+              这里两头都查：数组对 ≠ 屏幕上对，行没变多照样是坏的。 */
         if (nfMulti.hasWhoGroup) {
           const whoAll = subArtists(pBnow);
           const first = whoAll[0];
           nfMulti.whoAll = whoAll;
+          const titleOf = (el) => ((el.querySelector(".title") || {}).textContent || "");
           const itemOfWho = () => {
             const p = document.querySelector(".popup");
             return p && Array.from(p.querySelectorAll("div"))
@@ -1104,8 +1198,23 @@ async function diagReport() {
           nfMulti.whoInvClicked = actClick(1, "反选");
           await wait(300);
           nfMulti.whoInv = (nfCur().who || []).slice();
-          nfMulti.whoInvOk = nfMulti.whoInv.length === whoAll.length - 1
-            && nfMulti.whoInv.indexOf(first) < 0;
+          /* 期望的补集 = 真制作人里除 first 外的人 +「未分配」。
+             ⚠ 必须在**反选之前**算出这层有没有"没人认领"的环节，
+             反选之后 rowsOfB 已经被筛过了，从行上反推会绕回同一个坑。 */
+          const wantInv = whoAll.filter((w) => w !== first).concat([WHO_NONE]);
+          nfMulti.noneInLayer = subHasNone(pBnow);
+          nfMulti.whoInvWant = wantInv;
+          nfMulti.whoInvOk = wantInv.every((w) => (nfCur().who || []).indexOf(w) >= 0)
+            && (nfCur().who || []).every((w) => wantInv.indexOf(w) >= 0);
+          const rw = rowsOfB().map(titleOf);
+          nfMulti.whoInvRows = rw;
+          nfMulti.noneKept = rw.indexOf("第一环节") >= 0;     // 没人派工的样本行还得在
+          nfMulti.whoDropped = rw.indexOf("子任务") < 0;      // 派了工的那条才该走
+          const p2 = document.querySelector(".popup");
+          const nt = p2 && Array.from(p2.querySelectorAll("div")).find(
+            (d) => !d.className && (d.textContent || "").indexOf("（未分配）") >= 0);
+          nfMulti.noneRowShown = !!nt;
+          nfMulti.noneRowTicked = !!(nt && nt.textContent.indexOf("✓") >= 0);
           await ensureActs(2);
           actClick(1, "清空");                  // 收尾
           await wait(250);
@@ -1117,6 +1226,7 @@ async function diagReport() {
       nodeFilter = {
         hasBtn: hasBtn, hasInput: hasInput,
         bAll: bAll, txtShown: txtShown, txtHit: txtHit, txtTrimmed: txtTrimmed,
+        txtRows: txtRows, txtExpN: txtExpN, txtNoLeak: txtNoLeak,
         statPicked: statPicked, statRows: statRows, feedbackRows: feedbackRows,
         statKeepOk: statKeepOk, statTrimmed: statTrimmed,
         label: label, btnAlways: btnAlways, cleared: cleared, back: back,
@@ -1137,6 +1247,14 @@ async function diagReport() {
     openNodesDialog(p0.id, stage ? stage.id : null, p0.title);
     await wait(250);
     const dlg = getComputedStyle($("#ovNodes")).display;
+    /* 弹窗里这几句是用户逐句定过的措辞，谁改回去都该被逮住 ——
+       所以除了"新文案在不在"，还要**反向**钉住老文案没回来。 */
+    const toSay = ($("#nodesTo") || {}).textContent || "";
+    const phSay = ($("#nodesSpec") || {}).placeholder || "";
+    const hintSay = (($("#ovNodes .hint") || {}).textContent || "").replace(/\s+/g, " ");
+    /* ⚠ 空态那句话必须在**灌数据之前**读：下面一填值它就变成"将创建 N 个"了，
+       放在后面读会永远读到结果态，断言看着是绿的其实什么都没测到。 */
+    const emptySay = ($("#nodesPrev") || {}).textContent || "";
     $("#nodesSpec").value = "s001,s003A,s006-009";
     await refreshNodesPrev();
     await wait(500);
@@ -1154,6 +1272,7 @@ async function diagReport() {
                              "s001,s003A,s006-009");
     rep.nodes = {
       dlg: dlg,
+      toSay: toSay, phSay: phSay, hintSay: hintSay, emptySay: emptySay,
       prevOk: prev.indexOf("将创建") >= 0,
       prevAll: want.every((t) => prev.indexOf(t) >= 0),
       titles: titles,
@@ -1303,10 +1422,102 @@ async function diagReport() {
     await wait(400);
     mrep.pickAfter = n("#tree input.pick");
     mrep.barAfter = getComputedStyle($("#bulkBar")).display;
-    /* 批量条上该有的四颗按钮：改状态 / 改制作人 / 清空 / 退出。
+    /* 批量条上该有的六颗按钮：改状态 / 改制作人 / 改截止日期 / 改备注 / 清空 / 退出
+       （2026-10-03 加了后两个：能批量改制作人，日期和备注没道理不行）。
        「全选本层」按用户要求撤掉了 —— 与其断言"某个不存在的元素不存在"（恒真、等于没测），
        不如把**实际有哪些按钮**采回来：既确认没多出全选，也能发现少了谁。 */
     mrep.bulkBtns = Array.from(document.querySelectorAll("#bulkBar button")).map((b) => b.textContent.trim());
+
+    /* --- 批量条必须粘顶：树往下滑多远，它都留在内容区顶部 ---
+       2026-10-03 用户报：多选后往下滑，批量条跟着滚出窗口，改个状态还得先滑回去。
+       判据四条缺一不可：
+       ① position 真算出来是 sticky（写了没生效的情况很常见）；
+       ② **滚动真的发生了**（scrollable 小的话这条就是在测空气）；
+       ③ 滚完还在 main 顶部、且在视口内；
+       ④ 取批量条正中间那一点做命中测试 —— 落在它自己身上才算数。
+          z-index 忘给的话，sticky 照样成立、位置照样对，但会被后面的行盖住，
+          实际表现是"按钮点不动 / 点到背后的行"，光看前三条永远发现不了。 */
+    {
+      const mainEl = document.querySelector("main");
+      const barEl = $("#bulkBar");
+      const hintEl = $("#bulkHint");
+      /* ⚠ 内容不够高时 main 根本没有滚动条（第一次跑就是 room=0，等于在测空气）。
+         所以先往 main 末尾垫一块占位 -- 只加兄弟节点，不碰 #tree 的 HTML，
+         （render 会整块重画，往里塞东西会被冲掉），测完立刻拆。 */
+      const spacer = document.createElement("div");
+      spacer.id = "diagSpacer";
+      spacer.style.height = (mainEl.clientHeight * 2) + "px";
+      mainEl.appendChild(spacer);
+      await wait(200);
+      const top0 = barEl.getBoundingClientRect().top;
+      const room = Math.round(mainEl.scrollHeight - mainEl.clientHeight);
+      mainEl.scrollTop = Math.min(room, 500);
+      await wait(300);
+      const rr = barEl.getBoundingClientRect();
+      const mainTop = mainEl.getBoundingClientRect().top;
+      const hit = document.elementFromPoint(
+        Math.round(rr.left + Math.min(rr.width - 8, 30)),
+        Math.round(rr.top + rr.height / 2));
+      const hintH = hintEl ? Math.round(hintEl.getBoundingClientRect().height) : null;
+      const posOk = getComputedStyle(barEl).position === "sticky";
+      const scrolled = Math.round(mainEl.scrollTop);
+      const pastStick = scrolled > Math.round(top0 - mainTop) + 10;   // 确实滚过了"该粘住"的临界点
+      const pinned = Math.abs(rr.top - Math.round(mainTop)) <= 2;     // 停在**可视区**上沿
+      const inView = rr.bottom <= (window.innerHeight || 1e9);        // 整条都在视口里
+      const notCovered = !!(hit && barEl.contains(hit));              // 没被后面的行盖住
+      /* 条上方那一条（main 的 padding-top）不许漏出内容：
+         sticky 停的是内容盒顶部，留了缝的话滚动的行会从缝里溜到按钮上方 */
+      const above = document.elementFromPoint(
+        Math.round(rr.left + Math.min(rr.width - 8, 30)), Math.round(mainTop + 3));
+      const leakAbove = !!(above && (above.closest("#tree") || above.closest("#heat")));
+      const hintOneLine = hintH !== null && hintH <= 24;             // 提示只占一行
+      mrep.barSticky = {
+        pos: getComputedStyle(barEl).position,
+        room: room, scrolled: scrolled,
+        topBefore: Math.round(top0), topAfter: Math.round(rr.top),
+        mainTop: Math.round(mainTop), hintH: hintH,
+        hitInBar: notCovered, leakAbove: leakAbove,
+        above: above ? (above.id || String(above.className) || above.tagName) : null,
+        hit: hit ? (hit.id || String(hit.className) || hit.tagName) : null,
+        ok: posOk && room > 20 && pastStick
+            && pinned && inView && notCovered && !leakAbove && hintOneLine,
+      };
+      mainEl.scrollTop = 0;
+      if (spacer.parentNode) { spacer.parentNode.removeChild(spacer); }
+      await wait(200);
+    }
+
+    /* --- 批量条的排布：所有东西必须在**同一行**，且「退出多选」紧挨在「清空」右边 ---
+       用户报「退出多选掉到第二行左边」。根因在 hint 的 flex-basis 上（见 style.css）；
+       这条断言把排布钉死，免得以后谁再动 #bulkBar 的 flex 又把它挤下去。 */
+    {
+      const kids = Array.from($("#bulkBar").children);
+      /* ⚠ 判「有没有换行」要看**垂直中心**，不能看 offsetTop：
+         批量条是 align-items:center，高矮不齐的元素本来就不共顶边 ——
+         空的计数 span 高度是 0（top 正好落在中线上）、提示 16px、按钮 24px，
+         量出来是三种 top，其实全在同一行。只看 top 会永远误判成"换行了"。 */
+      const cen = kids.map((el) => {
+        const b = el.getBoundingClientRect();
+        return b.top + b.height / 2;
+      });
+      const spread = Math.round(Math.max.apply(null, cen) - Math.min.apply(null, cen));
+      const oneRow = spread <= 3;
+      const nb = $("#bulkNone").getBoundingClientRect();
+      const eb = $("#bulkExit").getBoundingClientRect();
+      /* 这一步还没选任何东西 → 计数必须整段留白（写「还没选」是老毛病：占版面还要读一遍） */
+      const cntTxt = ($("#bulkCnt") || { textContent: null }).textContent;
+      mrep.barLayout = {
+        kids: kids.length, oneRow: oneRow, spread: spread,
+        sameRow: Math.abs(nb.top - eb.top) <= 2,
+        exitRight: Math.round(eb.left) > Math.round(nb.left),
+        cntWhenNone: cntTxt,
+        hint: ($("#bulkHint") || {}).textContent,
+        ok: oneRow && kids.length === 8
+            && Math.abs(nb.top - eb.top) <= 2
+            && Math.round(eb.left) > Math.round(nb.left)
+            && cntTxt === "",
+      };
+    }
 
     /* --- #3 状态色块：竖条、真的比老圆点醒目（老版 7px 圆点，扫不出来） --- */
     const dotEl = document.querySelector("#tree .row .dot");
@@ -1347,42 +1558,84 @@ async function diagReport() {
       if (r1) {
         const c1 = r1.querySelector(".pick");
         const id1 = Number(r1.dataset.id);
+        const realClick = (el, opt) => {
+          const o = Object.assign({ bubbles: true, cancelable: true }, opt || {});
+          /* 用真 MouseEvent（`.click()` 是合成调用，测不出 activation 回滚那类问题） */
+          ["mousedown", "mouseup", "click"].forEach(
+            (t) => el.dispatchEvent(new MouseEvent(t, o)));
+        };
         selClear(); repaintSelection(); syncBulkBar();
         await wait(200);
-        /* 用真 MouseEvent（`.click()` 是合成调用，测不出 activation 回滚那类问题） */
-        const realClick = (el) => {
-          el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-          el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-          el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-        };
+
+        /* ① 点第一条 → 选中它（连带后代），复选框当场就是勾的
+           （老 bug 这里 checked=false，要再点一次才补上） */
         realClick(c0);
         await wait(250);
         mrep.pickClick1 = {
           id: id0, inSet: selNodes.has(id0), checked: c0.checked,
           cls: r0.classList.contains("picked"),
-          /* 期望：进集合了、复选框当场就是勾的（老 bug 这里 checked=false） */
           ok: selNodes.has(id0) && c0.checked === true
               && r0.classList.contains("picked"),
         };
+
+        /* ② 直接点第二条 = **单选**：第一条必须让位。
+           以前这里是"叠加"，用户 2026-10-02 报的就是这个
+           （"不按任何键时应当单选，现在是加减选模式"）。 */
         realClick(c1);
         await wait(250);
+        const tree1 = selfAndDescendants(findNode(id1)).map(Number);
         mrep.pickClick2 = {
           id: id1,
-          firstStillChecked: c0.checked,
-          firstInSet: selNodes.has(id0),
+          firstGone: !selNodes.has(id0),
+          firstUnchecked: c0.checked === false,
           secondInSet: selNodes.has(id1),
-          secondChecked: c1.checked,
-          /* 期望：两条都勾着，第一条**没有**被"延迟一拍" */
-          ok: selNodes.has(id0) && c0.checked === true
-              && selNodes.has(id1) && c1.checked === true,
+          secondChecked: c1.checked === true,
+          onlySecond: Array.from(selNodes).every((i) => tree1.includes(Number(i))),
+          ok: !selNodes.has(id0) && c0.checked === false
+              && selNodes.has(id1) && c1.checked === true
+              && Array.from(selNodes).every((i) => tree1.includes(Number(i))),
         };
-        /* 再点第一条 → 取消，复选框当场灭 */
-        realClick(c0);
+
+        /* ③ 再点同一条 → 取消（连点两次等于没选，不用特意按 Ctrl） */
+        realClick(c1);
         await wait(250);
         mrep.pickClick3 = {
-          outOfSet: !selNodes.has(id0), checked: c0.checked,
-          secondStillChecked: c1.checked,
-          ok: !selNodes.has(id0) && c0.checked === false && c1.checked === true,
+          empty: selCount() === 0, unchecked: c1.checked === false,
+          ok: selCount() === 0 && c1.checked === false,
+        };
+
+        /* ④ Ctrl 加选仍然叠加 */
+        realClick(c0); await wait(200);
+        const beforeCtrl = selCount();
+        realClick(c1, { ctrlKey: true });
+        await wait(250);
+        mrep.pickCtrl = {
+          before: beforeCtrl, after: selCount(),
+          bothIn: selNodes.has(id0) && selNodes.has(id1),
+          ok: selCount() > beforeCtrl && selNodes.has(id0) && selNodes.has(id1),
+        };
+
+        /* ⑤ **Shift 点复选框**也要能范围选 —— 老 bug：只有点"整行"才认 Shift，
+           而多选模式每行左边都有个小方块，用户点的恰恰是它。 */
+        selClear(); repaintSelection(); syncBulkBar();
+        await wait(150);
+        const fc = pickRows[0], lc = pickRows[pickRows.length - 1];
+        const fId = Number(fc.dataset.id), lId = Number(lc.dataset.id);
+        realClick(fc.querySelector(".pick"));
+        await wait(200);
+        realClick(lc.querySelector(".pick"), { shiftKey: true });
+        await wait(400);
+        const ord0 = visibleNodeOrder().map((x) => x.id);
+        const p1 = ord0.indexOf(fId), p2 = ord0.indexOf(lId);
+        const q1 = Math.min(p1, p2), q2 = Math.max(p1, p2);
+        const lRow = nodeRow(lId);
+        mrep.shiftCp = {
+          span: q2 - q1 + 1, sel: selCount(),
+          all: q1 >= 0 && ord0.slice(q1, q2 + 1).every((i) => selNodes.has(i)),
+          lastChecked: lRow ? lRow.querySelector(".pick").checked : null,
+          ok: q1 >= 0 && q2 - q1 + 1 >= 2
+              && ord0.slice(q1, q2 + 1).every((i) => selNodes.has(i))
+              && !!lRow && lRow.querySelector(".pick").checked === true,
         };
         selClear(); repaintSelection(); syncBulkBar();
         await wait(150);
@@ -1419,7 +1672,9 @@ async function diagReport() {
       const kidRow = nodeRow(kid.id);
       mrep.partial = { kidId: Number(kid.id), kidRow: !!kidRow };
       if (kidRow) {
-        kidRow.click();                                    // 减选子项（连带它后代）
+        /* ⚠ **必须 Ctrl 点**才是"减选"。2026-10-02 起直接点 = 单选
+           （再写 `kidRow.click()` 就变成"只选中这个子项"，跟以前语义不一样了）。 */
+        kidRow.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
         await wait(300);
         const pRow2 = nodeRow(pNode.id);
         const pCp = pRow2 ? pRow2.querySelector(".pick") : null;
@@ -1608,6 +1863,200 @@ async function diagReport() {
     mrep.artistOk = mrep.artistPick && selCount() >= 0
       && Array.from(selNodes).every((i) => artistOf(i) === mrep.artistPick);
 
+    /* --- 2026-10-02 需求③：多选后改**任意一条选中项**的状态 / 制作人，
+           其它选中项一起改（以前只有批量条上那两个按钮能改一批） --- */
+    selClear(); await reload(); await wait(500);
+    {
+      const rows3 = Array.from(document.querySelectorAll("#tree .row"))
+        .filter((el) => el.querySelector(".pick"));
+      /* 挑两条**互不包含**的：挑到父子的话，Ctrl 加选会被当成减选（坑见上面） */
+      let ra = null, rb = null;
+      for (let a = 0; a < rows3.length && !rb; a++) {
+        for (let b = a + 1; b < rows3.length; b++) {
+          const A = findNode(Number(rows3[a].dataset.id));
+          const B = findNode(Number(rows3[b].dataset.id));
+          if (!A || !B) continue;
+          const as = selfAndDescendants(A).map(Number);
+          const bs = selfAndDescendants(B).map(Number);
+          if (as.includes(Number(B.id)) || bs.includes(Number(A.id))) continue;
+          ra = rows3[a]; rb = rows3[b]; break;
+        }
+      }
+      mrep.rowPair = { has: !!rb };
+      if (rb) {
+        const ia = Number(ra.dataset.id), ib = Number(rb.dataset.id);
+        const readBy = (fn) => async () => {
+          const d = await call("load");
+          const get = (i) => {
+            let h = null;
+            (d.groups || []).forEach((g) => (g.projects || []).forEach((p) => {
+              const w = (arr) => (arr || []).forEach((x) => {
+                if (Number(x.id) === Number(i)) h = fn(x);
+                w(x.children);
+              });
+              w(p.children);
+            }));
+            return h;
+          };
+          return get;
+        };
+
+        /* ① 改状态：点其中一条的状态徽章 → 选中的全都跟着改 */
+        selClear(); repaintSelection(); syncBulkBar(); await wait(150);
+        ra.click(); await wait(200);
+        rb.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+        await wait(300);
+        const idsRow = Array.from(selNodes);
+        const stBefore = await readBy((x) => x.status)();
+        const list = ((await call("load")).status || {}).node || [];
+        /* 挑一个跟现在不一样的：都是同一个状态的话，改了也看不出区别 */
+        const wantSt = list.indexOf("反馈") >= 0 && stBefore(ia) !== "反馈"
+          ? "反馈" : (list.find((s) => s !== stBefore(ia)) || null);
+        ra.querySelector(".badge.st").click();
+        await wait(350);
+        /* 2026-10-03 用户报的 bug：**点状态徽章时选择集被清空**。
+           徽章那一下会冒泡到整行，被 multiClick 当成「直接点 = 单选」→
+           选择集只剩这一条；而 ids 是冒泡前就抓好的（多条），于是出现
+           "确实改了一批、屏幕上却只剩一个勾着"。徽章里补了 stopPropagation，
+           这里钉住：菜单还开着的时候，选择集必须还是原来那几条。 */
+        mrep.rowStatKeep = {
+          sel: selCount(), want: idsRow.length,
+          ok: idsRow.length >= 2 && selCount() === idsRow.length,
+        };
+        const popS = document.querySelector(".popup");
+        const itS = popS && wantSt
+          ? Array.from(popS.children).find((d) => d.textContent.indexOf(wantSt) >= 0) : null;
+        if (itS) { itS.click(); await wait(1500); }
+        const stAfter = await readBy((x) => x.status)();
+        /* 光"所有选中项都等于目标状态"不够 —— 它们本来就全是那个状态的话也成立。
+           所以还要一条：**除了被点的那条，至少还有一条真的从别的值改过来**。 */
+        const others = idsRow.filter((i) => i !== ia);
+        mrep.rowStat = {
+          menuOk: !!itS, want: wantSt, ids: idsRow,
+          before: idsRow.map(stBefore), got: idsRow.map(stAfter),
+          someoneElseMoved: others.some((i) => stBefore(i) !== wantSt),
+          ok: !!itS && !!wantSt && idsRow.length >= 2
+              && idsRow.every((i) => stAfter(i) === wantSt)
+              && others.some((i) => stBefore(i) !== wantSt),
+        };
+
+        /* ② 改制作人：直接点行上那块「制作人 X」。
+           两步准备，让断言不至于"本来就成立"：
+             a) 先给 ra 一个制作人 → 行上才会渲染出 `.meta.who`（没制作人的行不画这块）；
+             b) 再拿一个**不在本次选择里**的环节写上候选值「甲」→ 菜单里有得挑，
+                而且这个值是别人都没有的，选中项被改成它就一定是真改动。
+           另外 ⋯ 菜单那条路仍然要试（`via` 会记下来），两条路都得通。 */
+        const others3 = Array.from(document.querySelectorAll("#tree .row"))
+          .filter((el) => el.querySelector(".pick"))
+          .map((el) => Number(el.dataset.id))
+          .filter((i) => i !== ia && i !== ib);
+        await call("set_field", "node", ia, "artist", "甲原始人");
+        if (others3.length) await call("set_field", "node", others3[0], "artist", "甲");
+        await reload(); await wait(500);
+        const ra2 = nodeRow(ia), rb2 = nodeRow(ib);
+        mrep.rowArtist = { has: !!(ra2 && rb2) };
+        if (ra2 && rb2) {
+          selClear(); repaintSelection(); syncBulkBar(); await wait(150);
+          ra2.click(); await wait(200);
+          rb2.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+          await wait(300);
+          const idsA = Array.from(selNodes);
+          const whoAfter0 = await readBy((x) => x.artist)();
+          const beforeA = idsA.map(whoAfter0);
+          const whoEl = ra2.querySelector(".meta.who");
+          mrep.rowArtist.via = whoEl ? "meta.who" : "more-menu";
+          if (whoEl) {
+            whoEl.click();
+          } else {
+            ra2.querySelector(".mini.more").click();
+            await wait(350);
+            const pm = document.querySelector(".popup");
+            const mi = pm && Array.from(pm.children).find(
+              (d) => d.textContent.indexOf("编辑制作人") >= 0);
+            mrep.rowArtist.menuItem = !!mi;
+            if (mi) { mi.click(); await wait(400); }
+          }
+          await wait(350);
+          const popA = document.querySelector(".popup");
+          /* 挑「甲」这个候选（跳过「清空制作人」「手输一个…」） */
+          const itA = popA ? Array.from(popA.children).find(
+            (d) => d.textContent && d.textContent.trim() === "甲") : null;
+          if (itA) { itA.click(); await wait(1500); }
+          await reload(); await wait(400);
+          const whoAfter = await readBy((x) => x.artist)();
+          const gotA = idsA.map(whoAfter);
+          const othersA = idsA.filter((i) => i !== ia);
+          mrep.rowArtist.pick = "甲";
+          mrep.rowArtist.ids = idsA;
+          mrep.rowArtist.before = beforeA;
+          mrep.rowArtist.got = gotA;
+          mrep.rowArtist.someoneElseMoved = othersA.some(
+            (i) => beforeA[idsA.indexOf(i)] !== "甲");
+          mrep.rowArtist.ok = !!itA && idsA.length >= 2
+            && gotA.every((v) => v === "甲")
+            && othersA.some((i) => beforeA[idsA.indexOf(i)] !== "甲");
+        }
+
+        /* ③④ 截止日期 / 备注：跟制作人**完全同构**，所以抽一段共用流程。
+           两步准备（跟上面 ② 一个道理）：
+             a) 给 ia 一个值 → 行上才会画出可点的那一块（没值的行不画那块）；
+             b) 把目标值 seed 到一条**不在本次选择里**的环节 → 菜单里有这个候选，
+                而且它是别人都没有的，选中项被改成它就一定是真改动。
+           `inMenu` 单独记下来：候选菜单有取条数上限，万一 seed 的值没进菜单，
+           红灯能看到是"候选没进去"还是"改没生效"。 */
+        const runBulkField = async (field, cls, menuLabel, seedMine, pickValue) => {
+          const out = { field: field, pick: pickValue };
+          selClear(); await reload(); await wait(400);
+          await call("set_field", "node", ia, field, seedMine);
+          if (others3.length) await call("set_field", "node", others3[0], field, pickValue);
+          await reload(); await wait(400);
+          const r1 = nodeRow(ia), r2 = nodeRow(ib);
+          out.has = !!(r1 && r2);
+          if (!r1 || !r2) return out;
+          out.inMenu = fieldValues(field).indexOf(pickValue) >= 0;
+          selClear(); repaintSelection(); syncBulkBar(); await wait(150);
+          r1.click(); await wait(200);
+          r2.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+          await wait(300);
+          const ids = Array.from(selNodes);
+          const beforeF = await readBy((x) => x[field])();
+          const before = ids.map(beforeF);
+          const el = r1.querySelector(cls);
+          out.via = el ? cls : "more-menu";
+          if (el) {
+            el.click();
+          } else {
+            r1.querySelector(".mini.more").click(); await wait(350);
+            const pm = document.querySelector(".popup");
+            const mi = pm && Array.from(pm.children).find(
+              (d) => d.textContent.indexOf(menuLabel) >= 0);
+            out.menuItem = !!mi;
+            if (mi) { mi.click(); await wait(400); }
+          }
+          await wait(350);
+          const pop = document.querySelector(".popup");
+          const it = pop ? Array.from(pop.children).find(
+            (d) => d.textContent && d.textContent.trim() === pickValue) : null;
+          out.menuOk = !!it;
+          if (it) { it.click(); await wait(1500); }
+          await reload(); await wait(400);
+          const afterF = await readBy((x) => x[field])();
+          const got = ids.map(afterF);
+          const others = ids.filter((i) => i !== ia);
+          out.ids = ids; out.before = before; out.got = got;
+          out.someoneElseMoved = others.some((i) => before[ids.indexOf(i)] !== pickValue);
+          out.ok = !!it && ids.length >= 2 && got.every((v) => v === pickValue)
+                   && out.someoneElseMoved;
+          return out;
+        };
+        mrep.rowDue = await runBulkField("deadline", ".meta.due", "编辑截止日期",
+                                         "2026-11-11", "2027-12-31");
+        mrep.rowNote = await runBulkField("note", ".meta.note", "编辑备注",
+                                          "甲备注原始", "批量备注A");
+      }
+    }
+    selClear(); repaintSelection(); syncBulkBar(); await wait(150);
+
     /* 「清空」全部取消；「退出多选」复选框消失 */
     $("#bulkNone").click(); await wait(300);
     mrep.none = selCount();
@@ -1669,6 +2118,12 @@ async function diagReport() {
       $("#newClient").value = "冒烟客户";        // 已有客户：按名字挂上
       $("#newAmount").value = "1234";
       $("#newPaid").value = "234";
+      /* 截止日期是原生 date 框：直接置 ISO 就行，库里该是 2026-12-31。
+         顺带验"有值时自绘占位必须让位"—— 那个 YYYY/MM/DD 只在空值时顶在框里
+         （有值时原生自己画的 2026/12/31 正是要的格式，不能拿占位去盖）。 */
+      $("#newDl").value = "2026-12-31";
+      syncDl();
+      const duePhWithVal = getComputedStyle($("#newDlPh")).display;
       $("#newOk").click();
       await wait(2200);
       const f2 = await call("finance_data", 0, 0, "CNY");
@@ -1678,6 +2133,26 @@ async function diagReport() {
             pending: p.pending, client: p.client }
         : { ok: false, alert: window.__alert || null,
             projects: (f2.projects || []).map((x) => x.project) };
+      const dDl = await call("load");
+      let pDl = null;
+      (dDl.groups || []).forEach((g) => (g.projects || []).forEach((x) => {
+        if (x.title === "冒烟-款项项目") pDl = x;
+      }));
+      rep.create.dueIn = "2026-12-31";
+      rep.create.dueStored = pDl ? pDl.deadline : null;
+      rep.create.duePhWithVal = duePhWithVal;
+
+      /* 原生 date 框**天然写不进非法日期**：塞「下周三」「2026/12/31」进去 value 都会变成
+         空串（只有 ISO 收得下）。所以手写框那套"格式写错就拦下"的校验连同 normDay 一起删了 ——
+         这种失败在原生框上根本发生不了。
+         顺带：重开弹窗后自绘占位该回来（openNewDialog 里 value="" + syncDl()）。 */
+      openNewDialog();
+      await wait(200);
+      rep.create.duePhBack = getComputedStyle($("#newDlPh")).display;
+      const badEl = $("#newDl");
+      badEl.value = "下周三"; rep.create.rejectCn = badEl.value;
+      badEl.value = "2026/12/31"; rep.create.rejectSlash = badEl.value;
+      badEl.value = "2026-12-31"; rep.create.acceptIso = badEl.value;
 
       /* 再建一个：客户框里写一个库里没有的名字，应当自动建客户并挂上。
          注意这里要看 load 而不是 finance_data —— 财务列表只列有款项的项目，
@@ -1718,30 +2193,68 @@ async function diagReport() {
       await loadFinance();
       renderClients();
 
-      /* ① 开面板 = 新建态：删除按钮必须是收着的
-            （不然上次编辑过客户后再开面板，按钮还露着、editCli 还指着旧 id） */
+      /* ① 开面板。删除入口已从弹窗底部挪到列表行的 ⋯ 菜单里，
+            所以这里反过来钉两件事：底部那颗按钮**不在了**、结算周期那句提示也撤了。 */
       $("#finClientsBtn").click();
       await wait(250);
       crep.opened = getComputedStyle($("#ovCli")).display !== "none";
-      crep.delHiddenFresh = $("#cliDel").style.display === "none";
+      crep.delBtnGone = !document.querySelector("#cliDel");
+      crep.subGone = !document.querySelector("#ovCli .sub");
+      /* 列表里每一行右边都得有那颗 ⋯（少了就等于删不掉那个客户） */
+      crep.ops = document.querySelectorAll("#cliList [data-cli]").length;
+      crep.rows = document.querySelectorAll("#cliList .ftrow.body").length;
 
-      /* ② 点开列表里那行 → 表单填上、删除按钮露出来 */
       const pickRow = (name) => Array.from($("#cliList").querySelectorAll("[data-cli]"))
         .find((el) => {
           const nm = el.parentElement.querySelector(".nm");
           return nm && nm.textContent === name;
         });
-      const row = pickRow("冒烟待删客户");
-      crep.rowFound = !!row;
-      if (row) {
-        row.click();
-        await wait(250);
-        crep.delShownEdit = $("#cliDel").style.display !== "none";
-        crep.nameFilled = $("#cliName").value === "冒烟待删客户";
+      /* ⚠ 每次都**按名字重捞**行再点：上一轮里 __cliEdit 会把表单填上，
+         而删客户之后 renderClients 会整块重画，旧节点成了脱离 DOM 的快照，
+         拿旧引用再点一下就点了个寂寞（菜单不弹，断言看着"没反应"）。 */
+      const menuOf = async (name) => {
+        const r = pickRow(name);
+        if (!r) return null;
+        r.click();
+        await wait(220);
+        const pop = document.querySelector(".popup");
+        return pop ? Array.from(pop.children) : null;
+      };
+      const item = (kids, txt) => (kids || []).find((d) => d.textContent === txt);
 
-        /* ③ 真点删除 → 客户从列表里消失、表单被清空、没有报错弹窗 */
-        window.__alertDel = null;
-        $("#cliDel").click();
+      /* ② ⋯ 菜单里必须有两个入口：编辑客户 / 删除客户 */
+      const kids = await menuOf("冒烟待删客户");
+      crep.rowFound = !!pickRow("冒烟待删客户");
+      crep.menu = kids ? kids.map((d) => d.textContent) : null;
+      crep.hasEdit = !!item(kids, "编辑客户");
+      crep.hasDel = !!item(kids, "删除客户");
+      /* 弹窗是 z-index 200 的遮罩，菜单得画在它上面才点得到（.popup 必须是 300）。
+         光看"菜单在 DOM 里"没用 —— 老值 100 时菜单照样建出来，只是人看不见、点不着。 */
+      const pp = document.querySelector(".popup");
+      crep.popZ = pp ? parseInt(getComputedStyle(pp).zIndex, 10) : 0;
+      crep.popTop = pp ? pp.getBoundingClientRect().top : 0;
+      /* 破坏性动作必须染红：跟旁边「编辑客户」一个颜色的话，手快点下去就没了。
+         比"两行颜色不同 + 红通道最大"而不是钉死色值 —— 明暗两套主题的 --red 不一样。 */
+      const dEl = item(kids, "删除客户"), eEl = item(kids, "编辑客户");
+      crep.delColor = dEl ? getComputedStyle(dEl).color : "";
+      const _rgb = (crep.delColor.match(/\d+/g) || [0, 0, 0]).map(Number);
+      crep.delRed = !!dEl && !!eEl
+        && crep.delColor !== getComputedStyle(eEl).color
+        && _rgb[0] > _rgb[1] && _rgb[0] > _rgb[2];
+
+      /* ③ 「编辑客户」这条老路不能因为多了一层菜单就丢 */
+      const ed = item(kids, "编辑客户");
+      if (ed) { ed.click(); await wait(250); }
+      crep.nameFilled = $("#cliName").value === "冒烟待删客户";
+      crep.saveTxt = $("#cliSave").textContent;
+
+      /* ④ 重开菜单点「删除客户」→ 客户从列表消失、表单清空、没有报错弹窗 */
+      window.__alertDel = null;
+      const kids2 = await menuOf("冒烟待删客户");
+      const del2 = item(kids2, "删除客户");
+      crep.menu2 = kids2 ? kids2.map((d) => d.textContent) : null;
+      if (del2) {
+        del2.click();
         await wait(800);
         const after = await call("finance_data", 0, 0, "CNY");
         crep.deleted = !(after.clients || []).some((c) => c.name === "冒烟待删客户");
@@ -1750,26 +2263,23 @@ async function diagReport() {
         crep.delOk = crep.deleted && !crep.delAlert && crep.formCleared;
       }
 
-      /* ④ 还有项目挂靠的客户必须删不掉，并把原因 alert 出来（不是静默失败） */
+      /* ⑤ 还有项目挂靠的客户必须删不掉，并把原因 alert 出来（不是静默失败）。
+            走的是同一个入口 —— 菜单里照样给"删除客户"，被拒的话落到 alert 上。 */
       await loadFinance();
       renderClients();
       const busy = (fin.clients || []).find((c) => c.name === "冒烟客户");
       crep.busyFound = !!busy;
       if (busy) {
-        const row2 = Array.from($("#cliList").querySelectorAll("[data-cli]"))
-          .find((el) => Number(el.dataset.cli) === Number(busy.id));
-        if (row2) {
-          row2.click();
-          await wait(250);
-          window.__alertDel = null;
-          $("#cliDel").click();
-          await wait(800);
-          crep.busyMsg = window.__alertDel;
-          crep.busyBlocked = !!window.__alertDel && /项目/.test(window.__alertDel);
-          /* 再问一次后端：确认真的还在（没被偷偷删掉） */
-          const still = await call("client_delete", busy.id);
-          crep.stillRefused = still.ok === false;
-        }
+        window.__alertDel = null;
+        const kids3 = await menuOf("冒烟客户");
+        const del3 = item(kids3, "删除客户");
+        crep.busyHasDel = !!del3;
+        if (del3) { del3.click(); await wait(800); }
+        crep.busyMsg = window.__alertDel;
+        crep.busyBlocked = !!window.__alertDel && /项目/.test(window.__alertDel);
+        /* 再问一次后端：确认真的还在（没被偷偷删掉） */
+        const still = await call("client_delete", busy.id);
+        crep.stillRefused = still.ok === false;
       }
       modal("#ovCli", false);
     } finally {

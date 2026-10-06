@@ -526,12 +526,13 @@ class Board:
         else:
             self._touch(oid)
 
-    def bulk_update(self, ids, status=None, artist=None) -> dict:
-        """多选批量改「环节状态」和「制作人」（issue #3）。
+    def bulk_update(self, ids, status=None, artist=None,
+                    deadline=None, note=None) -> dict:
+        """多选批量改环节的「状态 / 制作人 / 截止日期 / 备注」。
 
         逐个走 set_status / set_field 而不是拼一条 UPDATE，是为了让**活跃度口径**
         自动保持一致：环节流转到 NODE_ACTIVE_STATUS 里的状态才计活跃、
-        改制作人不计 —— 一处改口径两处都跟上。
+        改制作人/日期/备注不计 —— 一处改口径两处都跟上。
         整体包在一个事务里，中途出错不留半拉子。
         返回 {ok, done, skipped, msg}，让界面能说清"改了几条、跳了几条"。
         """
@@ -544,7 +545,7 @@ class Board:
         want = list(dict.fromkeys(want))                 # 去重且保序
         if not want:
             return {"ok": False, "done": 0, "skipped": 0, "msg": "没选环节"}
-        if status is None and artist is None:
+        if status is None and artist is None and deadline is None and note is None:
             return {"ok": False, "done": 0, "skipped": 0, "msg": "没给要改成什么"}
 
         done, skipped, msg = 0, 0, None
@@ -559,6 +560,10 @@ class Board:
                     self.set_status("node", nid, str(status))
                 if artist is not None:
                     self.set_field("node", nid, "artist", str(artist))
+                if deadline is not None:
+                    self.set_field("node", nid, "deadline", str(deadline))
+                if note is not None:
+                    self.set_field("node", nid, "note", str(note))
                 done += 1
             self.db.conn.execute("COMMIT")
         except Exception as exc:

@@ -55,9 +55,11 @@
 
   <div id="bulkBar">
     <span class="cnt" id="bulkCnt">已选 0 条</span>
-    <span class="hint" id="bulkHint">点行选中（连带子级）· Ctrl 加选/减选 · Shift 范围选</span>
+    <span class="hint" id="bulkHint" title="Ctrl 加/减选，Shift 范围选。">Ctrl 加/减选，Shift 范围选。</span>
     <button id="bulkStat">改状态 ▾</button>
     <button id="bulkArtist">改制作人 ▾</button>
+    <button id="bulkDue">改截止日期 ▾</button>
+    <button id="bulkNote">改备注 ▾</button>
     <button id="bulkNone">清空</button>
     <button id="bulkExit">退出多选</button>
   </div>
@@ -126,7 +128,21 @@
     <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="newTitle" placeholder="输入项目名，可用中文。"></div>
     <div class="fld"><div class="lb">分类</div><div class="seg" id="segCat"></div></div>
     <div class="fld"><div class="lb">项目根目录</div><input type="text" id="newPath" placeholder="可留空"><button id="btnPick">浏览</button></div>
-    <div class="fld"><div class="lb">截止日期</div><input type="date" id="newDl" style="max-width:170px"></div>
+    <!-- 截止日期要的是两件事：**原生 date 框**（要它的日历选择器）+ 框里显示 YYYY/MM/DD。
+         原生框空值时画的是「yyyy/mm/日」—— 那段字在 UA shadow DOM 里，页面拿不到也改不了：
+         lang 属性实测无效（en-US / en-CA / ja-JP 画出来一模一样），placeholder 属性对它无效。
+         做法：空值且未聚焦时把那段 mask 设成透明（style.css 的
+         `#newDl:not(.hav):not(:focus)::-webkit-datetime-edit`），用下面这个自绘的 .dph 顶上。
+         有值时**不透明** —— 那时原生画出来就是 2026/12/31，正好是想要的格式。
+         ⚠ .hav 由 app.js 的 syncDl() 维护：date 框不支持 :placeholder-shown，
+           纯 CSS 判不出"有没有值"。
+         ⚠ .dph 必须排在 input **之后**（显隐靠 `~` 兄弟选择器）。 -->
+    <div class="fld"><div class="lb">截止日期</div>
+      <div class="dwrap" style="width:170px">
+        <input type="date" id="newDl">
+        <span class="dph" id="newDlPh">YYYY/MM/DD</span>
+      </div>
+    </div>
     <div class="fld"><div class="lb">客户</div>
       <input type="text" id="newClient" list="clientOpts" placeholder="选已有客户，或直接输入新名字" style="max-width:240px">
       <datalist id="clientOpts"></datalist>
@@ -249,17 +265,73 @@
   </div>
 </div>
 
+<!-- 导出财务数据：范围 / 项目 / 内容在这里挑；**位置和文件名交给系统「另存为」**。
+     ⚠ 「导出…」（#exOk）会弹出系统模态对话框 —— 冒烟里绝不能点它，
+     无人值守时会一直卡在那儿等点击。要验那条路只能另开线程去关窗口
+     （tests/_diag/smoke_export_save.py）。 -->
+<div class="ov" id="ovExport">
+  <div class="ovbox" style="width:600px">
+    <h3>导出财务数据</h3>
+    <p class="sub">挑好范围和内容，点「导出…」后由系统对话框决定存到哪儿、叫什么名字。</p>
+
+    <div class="fld" style="border-top:none"><div class="lb">格式</div>
+      <div class="seg" id="exFmt">
+        <button type="button" data-f="xlsx" class="act">Excel</button>
+        <button type="button" data-f="csv">CSV</button>
+        <button type="button" data-f="json">JSON</button>
+      </div>
+      <span class="hint" id="exFmtHint"></span>
+    </div>
+
+    <div class="fld"><div class="lb">时间范围</div>
+      <select id="exRange">
+        <option value="cur">同当前筛选</option>
+        <option value="all">全部时间</option>
+        <option value="year">本年度</option>
+        <option value="custom">自定义范围…</option>
+      </select>
+      <input type="date" id="exFrom" class="exdate" style="display:none">
+      <span class="hint" id="exToTip" style="display:none">至</span>
+      <input type="date" id="exTo" class="exdate" style="display:none">
+    </div>
+
+    <div class="fld top"><div class="lb">项目</div>
+      <div style="flex:1">
+        <select id="exPrj" style="max-width:220px">
+          <option value="0">全部项目</option>
+          <option value="1">指定项目…</option>
+        </select>
+        <div id="exPrjBox" style="display:none;margin-top:6px">
+          <div class="acts" style="margin-bottom:6px">
+            <button type="button" id="exPrjAll">全选</button>
+            <button type="button" id="exPrjNone">清空</button>
+          </div>
+          <div id="exPrjList"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="fld top"><div class="lb">内容</div><div style="flex:1" id="exSecs"></div></div>
+
+    <div class="prev" id="exPrev"></div>
+
+    <div class="closebar">
+      <button id="exCancel">取消</button><button id="exOk" class="on">导出…</button>
+    </div>
+  </div>
+</div>
+
 <div class="ov" id="ovNodes">
   <div class="ovbox" style="width:580px">
     <h3>新增子环节</h3>
     <p class="sub" id="nodesTo"></p>
     <div class="fld top" style="border-top:none"><div class="lb">名称</div>
-      <textarea id="nodesSpec" rows="3" placeholder="s001,s003A,s006-009"></textarea>
+      <textarea id="nodesSpec" rows="3" placeholder="填写环节名称..."></textarea>
     </div>
     <div class="hint" style="line-height:1.9">
-      多个名字用 <b>逗号 / 分号 / 顿号 / 空格 / 换行</b> 分隔；<b>连接号</b>一次生成连续编号。<br>
+      使用英文 <b>逗号 / 分号 / 空格 / 换行</b> 分隔可创建多个环节名，使用<b>连接号 -</b> 创建多个含有连续编号的环节。<br>
       例：<code>s001,s003A,s006-009</code> → s001 · s003A · s006 · s007 · s008 · s009<br>
-      名字里本来带连接号的（如 SANTI-OneDay）原样写就行，不会被展开；实在要保险可以用引号包起来：<code>"phase1-3"</code>
+      名字含有连接号但需要其不展开时，可使用英文双引号，如: <code>"S003-006"</code>
     </div>
     <div class="prev" id="nodesPrev"></div>
     <div class="closebar"><button id="nodesCancel">取消</button><button id="nodesOk" class="on">创建</button></div>
@@ -269,7 +341,6 @@
 <div class="ov" id="ovCli">
   <div class="ovbox" style="width:560px">
     <h3>客户</h3>
-    <p class="sub">结算周期写清楚，催款时用得上。</p>
     <div id="cliList"></div>
     <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="cliName" placeholder="客户 / 公司名"></div>
     <div class="fld"><div class="lb">联系人</div><input type="text" id="cliContact"></div>
@@ -280,8 +351,9 @@
       <input type="text" id="cliCycle" placeholder="月结 30 / 交付后 15 天 / 按镜头结算">
     </div>
     <div class="fld"><div class="lb">默认币种</div><input type="text" id="cliCcy" value="CNY" style="max-width:80px"></div>
+    <!-- 这里原来有一颗「删除客户」，只能删当前编着的那一个：想删别人得先进表单、
+         再按删除。已挪到列表行右边的 ⋯ 菜单里（点哪行删哪行）。 -->
     <div class="closebar">
-      <button id="cliDel" style="display:none;color:var(--red)">删除客户</button>
       <button id="cliReset" style="margin-right:auto">清空表单</button>
       <button id="cliClose">关闭</button>
       <button id="cliSave" class="on">保存客户</button>

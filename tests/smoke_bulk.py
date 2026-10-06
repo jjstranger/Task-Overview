@@ -79,6 +79,23 @@ def main() -> int:
     chk("批量改到白名单外的状态（通过）：流水写了、weight=0",
         last["kind"] == "status" and last["weight"] == 0 and "→ 通过" in last["detail"])
 
+    # ---- 4c. 截止日期 / 备注（2026-10-03 跟制作人一起接进批量改） ----
+    # 这两个跟改制作人同一口径：属于「整理动作」，不该计活跃。
+    before = db.one("SELECT COUNT(*) AS c FROM activity_log")["c"]
+    r = board.bulk_update([n1, n2], deadline="2026-12-31", note="批量备注")
+    chk("批量改截止日期+备注：ok 且 done=2", r.get("ok") is True and r.get("done") == 2)
+    dn = [db.one("SELECT deadline,note FROM nodes WHERE id=?", i) for i in (n1, n2)]
+    chk("两条的日期和备注都改了",
+        all(x["deadline"] == "2026-12-31" and x["note"] == "批量备注" for x in dn))
+    n3row = db.one("SELECT deadline,note FROM nodes WHERE id=?", n3)
+    chk("没选的第三条日期备注都没动", n3row["deadline"] is None and n3row["note"] is None)
+    after = db.one("SELECT COUNT(*) AS c FROM activity_log")["c"]
+    chk("批量改日期/备注不计活跃（跟改制作人同一口径）", after == before)
+    # 只给其中一个字段时，另一个不许被顺手清空
+    board.bulk_update([n1], note="")
+    r1 = db.one("SELECT deadline,note FROM nodes WHERE id=?", n1)
+    chk("只改备注时截止日期不动", r1["deadline"] == "2026-12-31" and r1["note"] == "")
+
     # ---- 5. 脏 id：跳过不失败 ----
     r = board.bulk_update([n1, 999999], status="暂停")
     chk("脏 id 算跳过、其余照改",

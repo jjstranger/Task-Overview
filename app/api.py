@@ -16,7 +16,7 @@ import node_spec
 import opener
 import paths
 import version
-from finance import Finance, parse_money
+from finance import EXTS, SECTION_CN, Finance, parse_money
 
 
 def _pick_log(msg: str) -> None:
@@ -26,6 +26,27 @@ def _pick_log(msg: str) -> None:
     表现就是「点浏览没反应」，事后完全查不出原因。
     """
     paths.log_line("pick.log", msg)
+
+
+# 系统「另存为」对话框的筛选器：格式 → file_types。
+# ⚠ 字符串必须是 webview 认的 `说明 (*.ext)` 形式，否则 parse_file_type 直接抛
+# ValueError（说明里的中文没问题，正则用的是 \w）。
+EXPORT_FILTERS = {
+    "xlsx": ("Excel 工作簿 (*.xlsx)",),
+    "csv": ("CSV 文本 (*.csv)",),
+    "json": ("JSON 文件 (*.json)",),
+}
+
+
+def _ensure_ext(path: str, ext: str) -> str:
+    """让返回的路径「扩展名就是用户刚选的格式」。
+
+    SaveFileDialog 会按筛选器补扩展名，但 pywebview 没设 DefaultExt，不保证；
+    用户也可能自己敲一个别的（选了 Excel 却叫 `报表.txt`）。这里以**格式为准**
+    换掉扩展名 —— 存出一个后缀是 .txt 的 xlsx，双击打不开还找不到原因。
+    """
+    root, e = os.path.splitext(path)
+    return path if e.lower() == ext.lower() else root + ext
 
 
 # "路径能不能用"的判断实现在 paths.py —— 引导页（boot.py）也要用同一套，
@@ -232,11 +253,16 @@ class Api:
             return {"ok": False, "msg": str(exc)}
         return {"ok": True}
 
-    def bulk_update(self, kind, ids, status=None, artist=None):
-        """多选批量改。目前只有环节支持（项目层用不着，也没有"环节制作人"那套）。"""
+    def bulk_update(self, kind, ids, status=None, artist=None,
+                    deadline=None, note=None):
+        """多选批量改。目前只有环节支持（项目层用不着，也没有"环节制作人"那套）。
+
+        四个字段一次都可以给多个，但界面上是一次改一样（菜单里选一个值）。
+        """
         if str(kind) != "node":
             return {"ok": False, "done": 0, "skipped": 0, "msg": "只支持批量改环节"}
-        return self._board.bulk_update(ids, status=status, artist=artist)
+        return self._board.bulk_update(ids, status=status, artist=artist,
+                                       deadline=deadline, note=note)
 
     def delete(self, kind, oid):
         self._board.delete(kind, int(oid))
@@ -344,12 +370,68 @@ class Api:
         self._fin.delete(int(rid))
         return {"ok": True}
 
-    def finance_export(self, fmt="xlsx", year=0):
+    def finance_export_plan(self, opts=None):
+        """只算「这批选项会导出成什么」，**不开任何对话框**。
+
+        界面拿它做文件名/条数预览；冒烟也走这条 —— 保存对话框是**模态框**，
+        无人值守时弹出来会把整轮冒烟卡死，所以自动跑的地方一律不碰它。
+        """
         try:
-            path = self._fin.export(str(fmt), int(year) or None)
+            o = self._fin.norm_opts(opts)
+            rows = self._fin.pick_rows(o)
+            return {
+                "ok": True,
+                "name": self._fin.build_name(o["fmt"], o),
+                "range": self._fin.range_label(o),
+                "sections": [SECTION_CN[s] for s in o["sections"]],
+                "count": len(rows),
+                "dir": self._fin.export_dir(),
+            }
         except Exception as exc:
             return {"ok": False, "msg": str(exc)}
-        return {"ok": True, "path": path, "dir": self._fin.export_dir()}
+
+    def finance_export_save(self, opts=None):
+        """导出到用户自己挑的位置和文件名 —— 位置、名字都在系统「另存为」里选。
+
+        ⚠ 用户取消**不算失败**：返回 `cancelled: True`，界面安静地把选项弹窗留着
+        让人重来。以前对话框类接口一律 `{"ok": False, "msg": ...}`，前端就会对
+        "只是点了取消"弹一句"导出失败"，纯属吓人。
+        """
+        try:
+            o = self._fin.norm_opts(opts)
+            name = self._fin.build_name(o["fmt"], o)
+        except Exception as exc:
+            return {"ok": False, "msg": str(exc)}
+
+        # 起始目录：上次导出到哪儿就从哪儿开始（记不住也没关系，退到导出目录）
+        start = self._db.get_setting("export_last_dir", "") or ""
+        r = self._pick(webview.FileDialog.SAVE, start, self._fin.export_dir(),
+                       save_filename=name, file_types=EXPORT_FILTERS[o["fmt"]])
+        if not r.get("ok"):
+            return r
+        path = r.get("path") or ""
+        if not path:
+            return {"ok": True, "cancelled": True}
+
+        path = _ensure_ext(path, "." + EXTS[o["fmt"]])
+        try:
+            self._fin.export_to(path, o["fmt"], o)
+        except PermissionError as exc:
+            return {"ok": False,
+                    "msg": "这个文件正被别的程序占着（Excel 开着？），关掉再试："
+                           + str(exc)}
+        except OSError as exc:
+            return {"ok": False, "msg": "写不进去：" + str(exc)}
+        except Exception as exc:
+            return {"ok": False, "msg": "导出失败：" + str(exc)}
+
+        d = os.path.dirname(os.path.abspath(path))
+        if d and d != start:
+            try:
+                self._db.set_setting("export_last_dir", d)
+            except Exception:
+                pass          # 记不住上次目录不是错误，文件已经写好了
+        return {"ok": True, "path": path, "dir": d}
 
     def export_dir(self):
         return {"ok": True, "path": self._fin.export_dir()}

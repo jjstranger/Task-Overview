@@ -7,7 +7,11 @@ python tools/build_exe.py              # 默认 onedir：dist\天在看\天在�
 python tools/build_exe.py --onefile    # 单文件：dist\天在看.exe
 python tools/build_exe.py --console    # 保留控制台窗口（排查打包问题用）
 python tools/build_exe.py --outdir X   # 出到别的目录，做对照构建用
+python tools/build_exe.py --force      # 跳过「旧产物被占用」预检（明知占用还硬来）
 ```
+
+构建前会先做一次 **[0/4] 预检**：如果 `dist\天在看` 正被运行中的看板占用，直接
+报清楚并退出（码 3），不会先把产物跑完再在让位那一步失败。
 
 ## 为什么默认 onedir 而不是 onefile
 
@@ -36,12 +40,14 @@ QNAP SMB 上实测（2026-09-27）：**对文件做 rename 会把该对象永久
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from ctypes import wintypes
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nasfs  # noqa: E402  NAS 上 rename 会毒化对象，搬运一律走它的「复制+删原」
@@ -55,6 +61,67 @@ from version import EXE_STEM  # noqa: E402  产物名的唯一来源（见 app/v
 
 BUILD_NAME = "Task-Overview"        # 构建用 ASCII 名（PyInstaller 不吃中文名）
 FINAL_NAME = EXE_STEM               # 出包后的正式名：天在看
+
+
+# ---- 构建前「旧产物被占用」预检（2026-10-05 加） ------------------------------
+#
+# 为什么要有它：[3/4] 的 move_aside 是「先 rmtree，删不掉才复制让位」。如果 `dist\天在看`
+# 正被运行中的看板占着，rmtree 会失败 → **先老老实实复制 51 MB 备份**，然后才发现原件
+# 还在原地、新产物放不进去，最后抛 err 32。两次实测的代价分别是「白跑 30 秒」和
+# 「dist 里多一个 32 MB 的 .prev-* 垃圾」。
+# 真正的处理办法（先把看板退干净）藏在报错的中括号里，读的人得先看懂 err 32。
+#
+# 这里把判据**原样提前**：用和 DeleteFileW 一模一样的条件去探 —— 以 DELETE 权限、
+# share=0 独占打开目录里每个文件。打不开（ERROR_SHARING_VIOLATION = 32）就是被占用。
+# 同一判据意味着「预检说没事、让位却照样挂」的概率很低；但仍留 `--force` 逃生门。
+
+_DELETE = 0x00010000                 # DeleteFileW 需要的访问权限
+_OPEN_EXISTING = 3
+_ERR_SHARING_VIOLATION = 32          # 与 move_aside 失败时看到的 err 32 同一个码
+_INVALID_HANDLE = 0xFFFFFFFFFFFFFFFF
+_SCAN_LIMIT = 3000                   # 扫这么多文件还没发现占用就认为目录是干净的
+
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+# ⚠ HANDLE 必须用 c_void_p / LPVOID：用 c_int 会被截断成 32 位，
+#   返回值恒不等于 INVALID_HANDLE_VALUE → 探测永远假阴性（这个坑本项目踩过一次）
+_k32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+]
+_k32.CreateFileW.restype = ctypes.c_void_p
+_k32.CloseHandle.argtypes = [wintypes.HANDLE]
+_k32.CloseHandle.restype = wintypes.BOOL
+
+
+def _file_locked(path: str) -> bool:
+    """这个文件能不能删？True = 被别的进程占着。
+
+    **只探测、不真删**：拿到句柄立刻关掉。判据与 DeleteFileW 一致。
+    """
+    h = _k32.CreateFileW(path, _DELETE, 0, None, _OPEN_EXISTING, 0, None)
+    if h is None or h in (0, _INVALID_HANDLE, -1):
+        return ctypes.get_last_error() == _ERR_SHARING_VIOLATION
+    _k32.CloseHandle(h)
+    return False
+
+
+def scan_locked(root: str, keep: int = 8) -> list[str]:
+    """扫 root（目录或单个文件），返回被占用的文件路径，最多 keep 条。"""
+    if os.path.isfile(root):
+        return [root] if _file_locked(root) else []
+    if not os.path.isdir(root):
+        return []
+    hits: list[str] = []
+    seen = 0
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            seen += 1
+            if seen > _SCAN_LIMIT or len(hits) >= keep:
+                return hits
+            p = os.path.join(base, name)
+            if _file_locked(p):
+                hits.append(p)
+    return hits
 
 
 def move_aside(path: str) -> str | None:
@@ -108,9 +175,37 @@ def main() -> int:
                     help="PyInstaller 的 distpath（暂存目录），默认放本地临时目录（见下）")
     ap.add_argument("--workpath", default="",
                     help="PyInstaller 中间目录，默认放本地临时目录（见下）")
+    ap.add_argument("--force", action="store_true",
+                    help="跳过「旧产物被占用」预检（明知被占用还硬来）")
     args = ap.parse_args()
     outdir = os.path.abspath(args.outdir)
     os.makedirs(outdir, exist_ok=True)
+
+    # [0/4] 预检：旧产物被占用的话现在就说清楚，别等 [3/4] 白复制 51 MB 备份才报 err 32。
+    #        判据与让位失败时完全一致（见 _file_locked 上方那段注释）。
+    target = os.path.join(outdir, FINAL_NAME + ".exe") if args.onefile \
+        else os.path.join(outdir, FINAL_NAME)
+    if not args.force and os.path.exists(target):
+        print("[0/4] 预检旧产物是否被占用 …")
+        locked = scan_locked(target)
+        if locked:
+            print("   !! 旧产物正被占用 —— 现在继续的话，[3/4] 让位时必定报 err 32（构建白做）")
+            for p in locked[:5]:
+                try:
+                    shown = os.path.relpath(p, outdir)
+                except ValueError:
+                    shown = p
+                print("        " + shown)
+            if len(locked) >= 8:
+                print("        …（还有更多，先按下面的办法处理）")
+            print()
+            print("   处理办法（任选其一）：")
+            print("     ① 关掉正在运行的看板 —— 别忘了右下角托盘图标里还挂着一份")
+            print("     ② 关掉后若还有残留：任务管理器里结束 msedgewebview2.exe")
+            print("     ③ 换个目录出包做对照：--outdir dist\\_verify")
+            print("     ④ 确定要跳过这道检查：加 --force")
+            return 3
+        print("   旧产物未被占用，继续")
 
     # 打包前先语法检查：拼错一个 import，PyInstaller 只会在运行时才炸
     print("[1/4] py_compile")

@@ -430,7 +430,7 @@ block=flex
   - `client_save()` / `client_delete()`（有项目挂着就拒绝删）
   - `export()` → `_write_csv()`（utf-8-sig）/ `_write_json()` / `_write_xlsx()`（4 张表）
   - `money()` 统一两位小数，避免浮点累加出现 `0.30000000000000004`
-- **`app/api.py`**：`finance_data / finance_add / finance_update / finance_delete / finance_export / export_dir / client_save / client_delete`；写操作一律 `try/except → {"ok":False,"msg":...}`，前端 `alert` 出中文原因
+- **`app/api.py`**：`finance_data / finance_add / finance_update / finance_delete / finance_export_plan / finance_export_save / export_dir / client_save / client_delete`；写操作一律 `try/except → {"ok":False,"msg":...}`，前端 `alert` 出中文原因（导出改两步：`_plan` 只算文件名/笔数做预览、`_save` 弹系统另存为落地）
 - **前端**：`renderFinance()`（年份 / 币种 / 客户三重筛选、卡片、可展开的项目表、账龄、客户汇总）、记一笔 / 编辑弹窗、客户弹窗、导出目录设置项
 - **数据库**：`settings` 新增 `nosandbox`（见下）
 

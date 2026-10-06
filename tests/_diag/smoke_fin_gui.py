@@ -247,6 +247,7 @@ def main() -> int:
     tree = rep.get("tree", {})
     heat = rep.get("heat", {})
     fin_ = rep.get("fin", {})
+    ex_ = rep.get("export", {})
     neww = rep.get("neww", {})
     cr = rep.get("create", {})
     ar = rep.get("artist", {})
@@ -304,9 +305,36 @@ def main() -> int:
     chk("币种筛选组已撤掉（只按人民币结算）", fin_.get("ccySeg") == 0)
     chk("「导出目录」按钮已并进菜单", fin_.get("dirBtn") == 0)
     chk("导出是一个按钮 + 下拉菜单", fin_.get("exportTag") == "BUTTON")
-    chk("导出菜单 = Excel / CSV / JSON / 打开导出目录",
-        [x for x in (fin_.get("exportMenu") or []) if x] ==
-        ["导出 Excel（四张表）", "导出 CSV", "导出 JSON", "打开导出目录"])
+    chk("导出菜单 = 导出… / 打开导出目录",
+        [x for x in (fin_.get("exportMenu") or []) if x] == ["导出…", "打开导出目录"])
+    # 导出选项弹窗：格式 / 时间范围 / 项目 / 内容 + 文件名预览。
+    # ⚠ 只验界面。#exOk（「导出…」）会弹**模态**系统对话框，冒烟里点它会把无人值守的
+    # 整轮卡在那儿等点击 —— 那条路走 tests/_diag/smoke_export_save.py（另开线程关窗口）。
+    chk("导出选项弹窗能打开", ex_.get("dlg") is True)
+    chk("格式三个 Excel / CSV / JSON，默认 Excel",
+        ex_.get("fmtBtns") == ["xlsx", "csv", "json"] and ex_.get("fmtAct") == "xlsx")
+    chk("内容四项默认全勾",
+        ex_.get("secs") == ["records", "projects", "clients", "aging"]
+        and ex_.get("secsOn") == ["records", "projects", "clients", "aging"])
+    chk("时间范围四项，且「同当前筛选」写在最前",
+        (ex_.get("rangeOpts") or [])[1:] == ["全部时间", "本年度", "自定义范围…"])
+    chk("「同当前筛选」写清了年份 (%s)" % ex_.get("curLabel"),
+        "同当前筛选" in (ex_.get("curLabel") or "")
+        and str(date.today().year) in (ex_.get("curLabel") or ""))
+    chk("文件名预览是 board_finance_*.xlsx (%s)" % ex_.get("planName"),
+        str(ex_.get("planName") or "").startswith("board_finance")
+        and str(ex_.get("planName") or "").endswith(".xlsx"))
+    chk("预览带出笔数 (%s)" % ex_.get("planCount"), str(ex_.get("planCount") or "").isdigit())
+    chk("项目默认「全部项目」、列表收起", ex_.get("prjClosed") is True)
+    chk("选「指定项目」后列表展开、默认全勾",
+        ex_.get("prjShown") is True and (ex_.get("prjN") or 0) >= 1
+        and ex_.get("prjOn") == ex_.get("prjN"))
+    chk("选「自定义范围」后两个日期框出现", ex_.get("datesShown") is True)
+    chk("CSV 固定只导款项明细（四项全锁死，只有明细是勾的）",
+        ex_.get("csvOn") == ["records"] and ex_.get("csvOff") == 4)
+    chk("切 CSV 后预览文件名变 .csv (%s)" % ex_.get("csvName"),
+        str(ex_.get("csvName") or "").endswith(".csv"))
+    chk("关掉后弹窗收起", ex_.get("closed") is True)
     # 外包只扣「已付」：已收 60000 − 外包 20000 = 实际收入 40000（另有一笔 5000 应付不扣）
     mt = fin_.get("money") or {}
     chk("外包支出只算已付，实际收入 = 已收 − 外包",
@@ -341,6 +369,18 @@ def main() -> int:
     chk("名称框占位符改成「输入项目名，可用中文。」（%s）" % neww.get("titlePh"),
         neww.get("titlePh") == "输入项目名，可用中文。")
     chk("客户栏右边那句「库里没有的名字…」提示撤掉了", neww.get("noCliHint") is True)
+    # 截止日期：**原生 date 框**（要它的日历选择器）+ 空值时自绘的 YYYY/MM/DD。
+    # 原生框空值时画的是「yyyy/mm/日」—— 页面改不了（lang 属性实测无效、placeholder 无效），
+    # 所以把那段 mask 设成透明、自己顶一个占位。这三条钉"占位真的在、且不吃点击"。
+    chk("截止日期是原生 date 框（要日历选择器，%s）" % neww.get("dueType"),
+        neww.get("dueType") == "date")
+    chk("空值时框里显示自绘的「YYYY/MM/DD」（%s，显示=%s）"
+        % (neww.get("duePh"), neww.get("duePhShown")),
+        neww.get("duePh") == "YYYY/MM/DD" and neww.get("duePhShown") is True)
+    # ⚠ 占位是盖在 input 上的：少了 pointer-events:none，点它就点不到原生日历。
+    #   只有 elementFromPoint 能逮住这种"看得见点不着"。
+    chk("自绘占位不吃点击（占位中心点上必须是输入框自己，%s）" % neww.get("duePhHit"),
+        neww.get("duePhHit") == "newDl")
     # 设置页：所有提示文字都收进了悬停工具提示，一个都不占版面
     chk("设置页没有任何常驻提示文字（.hint=%s）" % neww.get("setHints"),
         neww.get("setHints") == 0)
@@ -391,6 +431,20 @@ def main() -> int:
         cr.get("ok") is True and cr.get("contract") == 1234
         and cr.get("received") == 234 and cr.get("pending") == 1000)
     chk("新项目的客户挂对了", cr.get("client") == "冒烟客户")
+    # 截止日期：原生 date 框的 value 只可能是空串或 ISO —— 库里必须落成 2026-12-31
+    chk("截止日期置 ISO 后落库（%s → %s）"
+        % (cr.get("dueIn"), cr.get("dueStored")), cr.get("dueStored") == "2026-12-31")
+    # 有值时自绘占位必须让位（那时原生自己画的就是 2026/12/31，不能拿占位去盖）
+    chk("框里有值时自绘占位收起（display=%s）" % cr.get("duePhWithVal"),
+        cr.get("duePhWithVal") == "none")
+    chk("清空后自绘占位回来（display=%s）" % cr.get("duePhBack"),
+        cr.get("duePhBack") == "block")
+    # 原生框**天然写不进非法日期**：塞中文 / 斜杠进去 value 都变空串，只有 ISO 收得下。
+    # 这也是原来手写框那套"格式写错就拦下 + normDay 归一"可以整个删掉的原因。
+    chk("原生 date 框拒绝非法文本：下周三→%r、2026/12/31→%r、ISO→%r"
+        % (cr.get("rejectCn"), cr.get("rejectSlash"), cr.get("acceptIso")),
+        cr.get("rejectCn") == "" and cr.get("rejectSlash") == ""
+        and cr.get("acceptIso") == "2026-12-31")
     # 客户框里写一个库里没有的名字：应当自动建客户并挂上
     chk("客户框输入新名字会自动建客户", cr.get("newClient") == "冒烟新客户X")
     chk("客户数从 1 变 2", cr.get("clientCount") == 2)
@@ -486,6 +540,17 @@ def main() -> int:
     want6 = ["s001", "s003A", "s006", "s007", "s008", "s009"]
     titles = nd.get("titles") or []
     chk("批量录入弹窗能打开", nd.get("dlg") == "flex")
+    # 弹窗里的说明文字是用户逐句定过的措辞：新的必须在，老的不许回来
+    chk("弹窗文案：「挂到」改成了「添加到」",
+        str(nd.get("toSay") or "").startswith("添加到："))
+    chk("弹窗文案：名称占位提示 = 填写环节名称...",
+        nd.get("phSay") == "填写环节名称...")
+    chk("弹窗文案：未输入时的预览区提示",
+        nd.get("emptySay") == "填写环节名称后，这里将展示。")
+    _hs = str(nd.get("hintSay") or "")
+    chk("弹窗文案：写法说明已换新句（连接号 / 引号），老句不许回来",
+        "使用英文" in _hs and "连接号" in _hs and "英文双引号" in _hs
+        and "顿号" not in _hs and "名字里本来" not in _hs)
     chk("实时预览报了「将创建」", nd.get("prevOk") is True)
     chk("预览里六个名字都在", nd.get("prevAll") is True)
     chk("一行文本建出 6 个环节（含原有的「子任务」共 7 个）",
@@ -512,6 +577,11 @@ def main() -> int:
     chk("筛选框里是搜索框，打文字就筛（剩下的行里有目标、行数变少）",
         nf.get("hasInput") is True and nf.get("txtHit") is True
         and nf.get("txtTrimmed") is True)
+    # 条件要压到深层：只有「自己命中 or 子孙命中」的那些行能露出来，
+    # 父环节的子树不许按它自己的空条件重画一遍（老 bug：被筛掉的子环节从缝里钻回来）
+    chk("筛选条件压到深层：不含关键字、子孙也没有关键字的行不跟着露出来 (%s/%s 行=%s)"
+        % (nf.get("txtShown"), nf.get("txtExpN"), nf.get("txtRows")),
+        nf.get("txtNoLeak") is True)
     # 留下的行要么自己就是该状态，要么子树里有该状态（父环节要留着才看得出归属）
     chk("按状态筛：只剩「该状态 + 它的父环节」",
         nf.get("statPicked") is True and (nf.get("feedbackRows") or 0) > 0
@@ -539,7 +609,20 @@ def main() -> int:
         chk("子环节筛选·制作人：勾一个 → 反选 = 其余的人，清空后条件消失",
             len(nm.get("pickedWho") or []) == 1
             and ((nm.get("pickedWho") or [None])[0] == (nm.get("whoAll") or [None])[0])
-            and nm.get("whoInvOk") is True and not nm.get("afterWhoClr"))
+            and nm.get("whoInvClicked") is True and nm.get("whoInvOk") is True
+            and not nm.get("afterWhoClr"))
+    # 用户 2026-10-04 报的：制作人反选把"还没派人"的环节一起吞了。
+    # 补集里必须有「未分配」，且屏幕上要真的多出那些行。
+    if nm.get("hasWhoGroup") and nm.get("noneInLayer"):
+        _want = nm.get("whoInvWant") or []
+        chk("制作人反选：补集里带上了「未分配」(want=%s)" % (_want,),
+            _want and _want[-1] == ""
+            and (nm.get("whoInv") or []) == _want)
+        chk("制作人反选后：没人派工的环节真的还在屏幕上 (rows=%s)"
+            % (nm.get("whoInvRows"),),
+            nm.get("noneKept") is True and nm.get("whoDropped") is True)
+        chk("制作人反选后：菜单里「（未分配）」这一行露出来、且带着勾",
+            nm.get("noneRowShown") is True and nm.get("noneRowTicked") is True)
 
     # ---- 到期小标文案（2026-09-30 用户要求：别再用「D-1」「今天」这种像密码的记号） ----
     tree0 = rep.get("tree") or {}
@@ -690,10 +773,16 @@ def main() -> int:
     # 用户报的核心 bug：点复选框本身时"勾了不显示勾，点下一个才补上"（差一拍）
     chk("多选：点复选框本身 → 当场就显示勾（老 bug 是差一拍）",
         (mu.get("pickClick1") or {}).get("ok") is True)
-    chk("多选：再点第二条 → 两条都是勾的，第一条没有延迟",
+    # 2026-10-02 用户报：「不按任何键时应为单选，现在是加减选模式」——
+    #   旧断言恰恰是把"累加"当成正确行为写的，现在反过来钉：点第二条 = 第一条让位。
+    chk("多选：直接点第二条 = 单选（第一条让位，只剩第二条这棵）",
         (mu.get("pickClick2") or {}).get("ok") is True)
-    chk("多选：再点第一条取消 → 复选框当场灭、第二条不受影响",
+    chk("多选：再点同一条 → 全部取消（不用按 Ctrl）",
         (mu.get("pickClick3") or {}).get("ok") is True)
+    chk("多选：Ctrl 点 → 仍然是加选（两条都在）",
+        (mu.get("pickCtrl") or {}).get("ok") is True)
+    chk("多选：Shift 点**复选框**也要能范围选（以前只有点整行才认）",
+        (mu.get("shiftCp") or {}).get("ok") is True)
     # 级联选：点父环节 → 它 + 全部后代一起进选择集；再点一次整棵子树全撤
     chk("多选：状态色块是竖条（%sx%s、有色），比老圆点醒目"
         % (mu.get("dotW"), mu.get("dotH")), mu.get("dotOk") is True)
@@ -735,13 +824,39 @@ def main() -> int:
     chk("多选：目标已选时再 Shift 点 → 整段一起取消",
         (mu.get("shiftOff") or {}).get("sel") == 0
         and (mu.get("shiftOffDom") or {}).get("last") is False)
+    # 2026-10-02 用户要的：改**任意一条选中项**的状态 / 制作人 → 其它选中项跟着改。
+    #   断言回到数据库里读（call("load")），光看界面不够。
+    chk("多选：点选中项的状态徽章 → 选中的全都改成同一个状态",
+        (mu.get("rowStat") or {}).get("ok") is True)
+    chk("多选：点选中项的「制作人」→ 选中的全都改成同一个制作人",
+        (mu.get("rowArtist") or {}).get("ok") is True)
+    # 2026-10-03：截止日期 / 备注接进同一套批量改法
+    chk("多选：点选中项的「截止日期」→ 选中的全都改成同一个日期",
+        (mu.get("rowDue") or {}).get("ok") is True)
+    chk("多选：点选中项的「备注」→ 选中的全都改成同一个备注",
+        (mu.get("rowNote") or {}).get("ok") is True)
+    # 2026-10-03 用户报的 bug：点状态徽章（不 stopPropagation）→ 冒泡到整行被当成
+    #   「直接点=单选」，选择集只剩一条，于是"改了一批、屏幕上却只剩一个勾着"。
+    _k = mu.get("rowStatKeep") or {}
+    chk("多选：点状态徽章不会把选择集清掉（实际剩 %s / 应剩 %s）"
+        % (_k.get("sel"), _k.get("want")),
+        _k.get("ok") is True)
     # 「全选本层」按用户要求撤掉，改成点父级自带级联。
     # 断言方式：把批量条上实际有的按钮采回来 —— 既确认没把"全选"加回来，也能发现少了谁。
+    _bl = mu.get("barLayout") or {}
+    chk("多选：批量条一行排完，「退出多选」在「清空」右边（实际=%s）" % (_bl,),
+        _bl.get("ok") is True)
+    chk("多选：一条没选时计数整段留白、不写「还没选」",
+        _bl.get("cntWhenNone") == "")
+    _bs = mu.get("barSticky") or {}
+    chk("多选：树往下滚时批量条粘在内容区顶部、不被行盖住（实际=%s）" % (_bs,),
+        _bs.get("ok") is True)
     _bb = mu.get("bulkBtns") or []
-    chk("多选：批量条就这四颗按钮、没有「全选本层」（实际=%s）" % (_bb,),
-        len(_bb) == 4
+    chk("多选：批量条就这六颗按钮、没有「全选本层」（实际=%s）" % (_bb,),
+        len(_bb) == 6
         and not any("全选" in t for t in _bb)
-        and all(any(k in t for t in _bb) for k in ("状态", "制作人", "清空", "退出")))
+        and all(any(k in t for t in _bb)
+                for k in ("状态", "制作人", "截止日期", "备注", "清空", "退出")))
     chk("多选·改状态：菜单里有状态项、勾的几条真的都改了",
         mu.get("hasMenu") is True and mu.get("statOk") is True)
     chk("多选·改制作人：勾的几条制作人都改成了选的人",
@@ -771,16 +886,26 @@ def main() -> int:
         dbf.get("sync") is True)
     chk("多机同时打开：顶部提示条在（平时不占位）", dbf.get("syncBar") == 1)
 
-    # ---- 客户删除（财务页「客户」面板里的删除入口） ----
+    # ---- 客户删除（入口已从弹窗底部挪到列表行右边的 ⋯ 菜单） ----
     cl = rep.get("clients") or {}
-    chk("客户删除：面板刚打开时删除按钮是收着的（新建态，防误删上次编辑那个）",
-        cl.get("opened") is True and cl.get("delHiddenFresh") is True)
-    chk("客户删除：点开某个客户后删除按钮露出来、表单填上",
-        cl.get("rowFound") is True and cl.get("delShownEdit") is True
-        and cl.get("nameFilled") is True)
-    chk("客户删除：真点删除后客户从列表消失、表单清空、不报错（alert=%s）"
+    chk("客户弹窗：底部那颗「删除客户」按钮撤了（挪进列表行的 ⋯ 菜单）",
+        cl.get("opened") is True and cl.get("delBtnGone") is True)
+    chk("客户弹窗：结算周期那句提示文字撤掉了", cl.get("subGone") is True)
+    chk("客户列表每行右边都有 ⋯（%s 行 / %s 个）" % (cl.get("rows"), cl.get("ops")),
+        (cl.get("ops") or 0) > 0 and cl.get("rows") == cl.get("ops"))
+    chk("⋯ 菜单里有「编辑客户」和「删除客户」（%s）" % (cl.get("menu"),),
+        cl.get("hasEdit") is True and cl.get("hasDel") is True)
+    # ⚠ 菜单得画在客户弹窗（遮罩 z-index 200）之上，不然"点了三点没反应"
+    chk("菜单画在客户弹窗之上（z=%s > 200）" % (cl.get("popZ"),),
+        (cl.get("popZ") or 0) > 200 and (cl.get("popTop") or 0) > 0)
+    chk("「删除客户」真的染红了、跟「编辑客户」不同色（%s）" % (cl.get("delColor"),),
+        cl.get("delRed") is True)
+    chk("点「编辑客户」还是能进编辑态（表单填上、按钮变「更新客户」%s）"
+        % (cl.get("saveTxt"),),
+        cl.get("nameFilled") is True and cl.get("saveTxt") == "更新客户")
+    chk("点「删除客户」后客户从列表消失、表单清空、不报错（alert=%s）"
         % (cl.get("delAlert"),), cl.get("delOk") is True)
-    chk("客户删除：还有项目挂靠的客户删不掉，并把原因说出来（msg=%s）"
+    chk("还有项目挂靠的客户删不掉，并把原因说出来（msg=%s）"
         % (cl.get("busyMsg"),),
         cl.get("busyBlocked") is True and cl.get("stillRefused") is True)
 

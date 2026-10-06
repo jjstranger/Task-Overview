@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from datetime import date, datetime
 
 # 顺序就是「记一笔」弹窗里按钮的顺序：常用的到账、外包放前面，开票垫后
@@ -42,6 +43,42 @@ AGE_BUCKETS = [(30, "0-30 天"), (60, "31-60 天"), (90, "61-90 天"), (10 ** 9,
 
 FIELDS = ("project_id", "node_id", "kind", "amount", "currency",
           "tax_rate", "date", "status", "invoice_no", "note")
+
+# 导出：格式 → 扩展名，导出内容 → 中文名。
+# 内容这四项跟四张表一一对应：界面上的勾选框、xlsx 的工作表名、json 的键
+# 用的都是这一份清单 —— 以后加一项内容只改这里（含 _write_xlsx/_write_json）。
+EXTS = {"xlsx": "xlsx", "csv": "csv", "json": "json"}
+SECTIONS = [
+    ("records", "款项明细"),
+    ("projects", "项目汇总"),
+    ("clients", "客户汇总"),
+    ("aging", "应收账龄"),
+]
+SECTION_CN = dict(SECTIONS)
+
+
+def norm_fmt(fmt) -> str:
+    """认不出来的格式一律当 xlsx（老调用只传 "xlsx"/"csv"/"json"）。"""
+    f = str(fmt or "xlsx").lower().lstrip(".")
+    return f if f in EXTS else "xlsx"
+
+
+def _int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe(name: str, limit: int = 24) -> str:
+    """文件名里只留「各家文件系统都不会炸」的字符。
+
+    ⚠ Windows 文件名不能有 \\ / : * ? " < > |，而项目名里带「/」很正常
+    （「SANTI / 一天」这种），不洗掉的话系统另存为对话框会直接报路径非法 ——
+    用户看到的是「导不出来」，且完全猜不到是项目名里的一个斜杠引起的。
+    """
+    s = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(name or "")).strip(" _.")
+    return s[:limit]
 
 
 def _s(v) -> str:
@@ -110,8 +147,16 @@ class Finance:
         }
 
     def records(self, year: int | None = None, client_id: int | None = None,
-                project_id: int | None = None, kind: str = "") -> list[dict]:
-        """流水明细，带项目 / 客户 / 环节名。"""
+                project_id: int | None = None, kind: str = "",
+                date_from: str = "", date_to: str = "",
+                project_ids: list[int] | None = None) -> list[dict]:
+        """流水明细，带项目 / 客户 / 环节名。
+
+        `date_from` / `date_to` 是 ISO 日期、**闭区间**（导出时用；看板上的年份
+        下拉还是走 `year`）。⚠ 设了范围就把没填日期的流水排除掉 —— 它归不到
+        任何一段时间里，硬塞进来会让人以为"这段时间真有这笔"。
+        `project_ids` 是指定项目导出（多选）；`project_id` 仍然保留给单个用。
+        """
         sql = (
             "SELECT f.*, p.title AS prj, p.client_id AS cid, c.name AS client,"
             " n.title AS node, p.category AS cat"
@@ -134,6 +179,16 @@ class Finance:
         if kind:
             sql += " AND f.kind=?"
             args.append(kind)
+        if date_from:
+            sql += " AND f.date<>'' AND f.date>=?"
+            args.append(str(date_from))
+        if date_to:
+            sql += " AND f.date<>'' AND f.date<=?"
+            args.append(str(date_to))
+        if project_ids:
+            ids = [_int(x) for x in project_ids]
+            sql += " AND f.project_id IN (" + ",".join("?" * len(ids)) + ")"
+            args.extend(ids)
         sql += " ORDER BY (f.date IS NULL OR f.date=''), f.date DESC, f.id DESC"
 
         out = []
@@ -566,19 +621,103 @@ class Finance:
         return d
 
     def export(self, fmt: str, year: int | None = None) -> str:
-        fmt = (fmt or "xlsx").lower()
-        out = self.export_dir()
-        stamp = datetime.now().strftime("%Y%m%d_%H%M")
-        rows = self.records(year=year)
-        ext = {"xlsx": "xlsx", "csv": "csv", "json": "json"}[fmt]
-        path = os.path.join(out, f"board_finance_{stamp}.{ext}")
+        """不弹对话框、直接落到导出目录（快捷导出走这条）。
+        挑位置/文件名的那条路是 `export_to` + api 里的系统另存为对话框。"""
+        o = self.norm_opts({"fmt": fmt, "year": year or 0})
+        path = os.path.join(self.export_dir(), self.build_name(o["fmt"], o))
+        return self.export_to(path, o["fmt"], o)
 
+    # 导出选项：前端传过来的一个 dict，每一项都可以不给。
+    # 默认（什么都不给）= 全部时间 / 全部项目 / 四项内容全要 —— 就是老行为，
+    # 所以老的调用方（只传 fmt+year）不用改。
+    def norm_opts(self, opts: dict | None) -> dict:
+        o = dict(opts or {})
+        fmt = norm_fmt(o.get("fmt"))
+        raw = o.get("sections")
+        if raw is None:
+            secs = [k for k, _ in SECTIONS]
+        else:
+            secs = [s for s in (raw if isinstance(raw, (list, tuple)) else []) if s in SECTION_CN]
+            # ⚠ 界面上四项全不勾时**必须报错**，不能悄悄退回"全要" ——
+            # 那会导出一份用户明确表示不要的东西，比拒绝更坏。
+            if not secs:
+                raise ValueError("至少要选一项导出内容")
+        return {
+            "fmt": fmt,
+            "year": _int(o.get("year")),
+            "date_from": str(o.get("date_from") or "").strip(),
+            "date_to": str(o.get("date_to") or "").strip(),
+            "client_id": _int(o.get("client_id")),
+            "project_ids": [_int(x) for x in (o.get("project_ids") or [])],
+            # CSV 是一张平表，没有"四张表"可挑 —— 只给明细，别让界面勾了
+            # 项目汇总却导不出来（那种"少了东西"最难发现）
+            "sections": ["records"] if fmt == "csv" else secs,
+        }
+
+    def pick_rows(self, o: dict) -> list[dict]:
+        return self.records(
+            year=o["year"] or None,
+            client_id=o["client_id"] or None,
+            date_from=o["date_from"], date_to=o["date_to"],
+            project_ids=o["project_ids"],
+        )
+
+    def range_label(self, o: dict) -> str:
+        """范围给人看的一句话（json 里写一份，界面上也显示同一句）。"""
+        f, t = o["date_from"], o["date_to"]
+        if f and t:
+            return f"{f} 至 {t}"
+        if f:
+            return f"{f} 起"
+        if t:
+            return f"截至 {t}"
+        if o["year"]:
+            return f"{o['year']} 年"
+        return "全部时间"
+
+    def range_tag(self, o: dict) -> str:
+        """范围写进文件名的样子（只用 ASCII，省得跨系统传来传去出岔子）。"""
+        f, t = o["date_from"], o["date_to"]
+        if f and t:
+            return f"{f.replace('-', '')}-{t.replace('-', '')}"
+        if f:
+            return "from" + f.replace("-", "")
+        if t:
+            return "to" + t.replace("-", "")
+        if o["year"]:
+            return str(o["year"])
+        return "all"
+
+    def project_title(self, pid: int) -> str:
+        r = self.db.q("SELECT title FROM projects WHERE id=?", (_int(pid),))
+        return _s(r[0]["title"]) if r else ""
+
+    def build_name(self, fmt: str, o: dict) -> str:
+        """默认文件名：`board_finance_<范围>[_<项目名>]_<时间戳>.<ext>`。
+
+        系统「另存为」对话框只是把它填进文件名框，用户可以改。
+        """
+        parts = ["board_finance", self.range_tag(o)]
+        ids = [i for i in (o.get("project_ids") or [])]
+        if len(ids) == 1:
+            nm = _safe(self.project_title(ids[0]))
+            if nm:
+                parts.append(nm)
+        elif ids:
+            parts.append("%dprj" % len(ids))
+        parts.append(datetime.now().strftime("%Y%m%d_%H%M"))
+        return "_".join(parts) + "." + EXTS[norm_fmt(fmt)]
+
+    def export_to(self, path: str, fmt: str, o: dict) -> str:
+        fmt = norm_fmt(fmt)
+        o = self.norm_opts({**o, "fmt": fmt})
+        rows = self.pick_rows(o)
         if fmt == "csv":
             self._write_csv(path, rows)
         elif fmt == "json":
-            self._write_json(path, rows, year)
+            self._write_json(path, rows, o)
         else:
-            self._write_xlsx(path, rows, year)
+            self._write_xlsx(path, rows, o)
         return path
 
     def _table(self, rows: list[dict]) -> tuple[list[str], list[list]]:
@@ -600,30 +739,44 @@ class Finance:
             w.writerow(head)
             w.writerows(body)
 
-    def _write_json(self, path: str, rows: list[dict], year: int | None) -> None:
+    def _write_json(self, path: str, rows: list[dict], o: dict) -> None:
+        secs = o["sections"]
         projects = self._by_project(rows)
         payload = {
             "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "year": year or 0,
-            "cards": self._cards(rows),
-            "records": rows,
-            "projects": [{k: v for k, v in p.items() if k != "records"} for p in projects],
-            "clients": self._by_client(projects),
-            "aging": self._aging(rows, projects),
+            "range": self.range_label(o),
+            "year": o["year"] or 0,
         }
+        # cards 和 records 来自同一批 rows（cards 就是这批数的汇总口径），
+        # 所以勾了「款项明细」就一起给，不单独立一项
+        if "records" in secs:
+            payload["cards"] = self._cards(rows)
+            payload["records"] = rows
+        if "projects" in secs:
+            payload["projects"] = [{k: v for k, v in p.items() if k != "records"}
+                                   for p in projects]
+        if "clients" in secs:
+            payload["clients"] = self._by_client(projects)
+        if "aging" in secs:
+            payload["aging"] = self._aging(rows, projects)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    def _write_xlsx(self, path: str, rows: list[dict], year: int | None) -> None:
+    def _write_xlsx(self, path: str, rows: list[dict], o: dict) -> None:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
 
+        # 建表顺序 = SECTIONS 的顺序 = 界面上的勾选顺序
+        secs = o["sections"]
         wb = Workbook()
+        # ⚠ Workbook() 自带一张空表，不删掉的话勾四项就会多出第五张叫「Sheet」的表
+        wb.remove(wb.active)
         bold = Font(bold=True)
         fill = PatternFill("solid", fgColor="EFEFEF")
         right = Alignment(horizontal="right")
 
-        def sheet(ws, head, body, widths):
+        def sheet(title, head, body, widths, right_cols=()):
+            ws = wb.create_sheet(title)
             ws.append(head)
             for c in ws[1]:
                 c.font = bold
@@ -632,41 +785,41 @@ class Finance:
                 ws.append(r)
             for i, w in enumerate(widths, start=1):
                 ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+            for r in range(2, ws.max_row + 1):
+                for c in right_cols:
+                    ws.cell(row=r, column=c).alignment = right
             ws.freeze_panes = "A2"
-
-        head, body = self._table(rows)
-        sheet(wb.active, head, body,
-              [12, 9, 9, 16, 26, 20, 12, 7, 8, 14, 24])
-        wb.active.title = "款项明细"
 
         # 三张汇总表共用同一份 projects（以前每张各自再算一遍，一共跑三次）
         projects = self._by_project(rows)
 
-        ws2 = wb.create_sheet("项目汇总")
-        sheet(ws2,
-              ["项目", "客户", "合同额", "已收", "外包支出", "实际收入", "待收",
-               "已开票", "未开票", "合同日期", "最近到账", "笔数", "挂在环节"],
-              [[p["project"], p["client"], p["contract"], p["received"], p["outsource"],
-                p["net"], p["pending"], p["invoiced"], p["uninvoiced"],
-                p["contract_date"], p["last_payment"], p["count"], p["node_records"]]
-               for p in projects],
-              [26, 16, 12, 12, 12, 12, 12, 12, 12, 12, 12, 6, 10])
-        for r in range(2, ws2.max_row + 1):
-            for c in range(3, 12):
-                ws2.cell(row=r, column=c).alignment = right
+        if "records" in secs:
+            head, body = self._table(rows)
+            sheet("款项明细", head, body, [12, 9, 9, 16, 26, 20, 12, 7, 8, 14, 24])
 
-        ws3 = wb.create_sheet("客户汇总")
-        sheet(ws3,
-              ["客户", "项目数", "合同额", "已收", "外包支出", "实际收入", "待收",
-               "收款率%", "最早合同日"],
-              [[c["client"], c["projects"], c["contract"], c["received"], c["outsource"],
-                c["net"], c["pending"], c["rate"], c["oldest_contract"]] for c in
-               self._by_client(projects)],
-              [20, 8, 12, 12, 12, 12, 12, 9, 13])
+        if "projects" in secs:
+            sheet("项目汇总",
+                  ["项目", "客户", "合同额", "已收", "外包支出", "实际收入", "待收",
+                   "已开票", "未开票", "合同日期", "最近到账", "笔数", "挂在环节"],
+                  [[p["project"], p["client"], p["contract"], p["received"], p["outsource"],
+                    p["net"], p["pending"], p["invoiced"], p["uninvoiced"],
+                    p["contract_date"], p["last_payment"], p["count"], p["node_records"]]
+                   for p in projects],
+                  [26, 16, 12, 12, 12, 12, 12, 12, 12, 12, 12, 6, 10],
+                  right_cols=range(3, 12))
 
-        aging = self._aging(rows, projects)["buckets"]
-        ws4 = wb.create_sheet("应收账龄")
-        sheet(ws4, ["账龄", "待收金额"],
-              [[b["label"], b["amount"]] for b in aging], [14, 14])
+        if "clients" in secs:
+            sheet("客户汇总",
+                  ["客户", "项目数", "合同额", "已收", "外包支出", "实际收入", "待收",
+                   "收款率%", "最早合同日"],
+                  [[c["client"], c["projects"], c["contract"], c["received"], c["outsource"],
+                    c["net"], c["pending"], c["rate"], c["oldest_contract"]] for c in
+                   self._by_client(projects)],
+                  [20, 8, 12, 12, 12, 12, 12, 9, 13], right_cols=range(3, 9))
+
+        if "aging" in secs:
+            sheet("应收账龄", ["账龄", "待收金额"],
+                  [[b["label"], b["amount"]] for b in self._aging(rows, projects)["buckets"]],
+                  [14, 14], right_cols=(2,))
 
         wb.save(path)

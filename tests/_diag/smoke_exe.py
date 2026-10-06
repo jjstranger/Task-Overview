@@ -189,6 +189,7 @@ def main() -> int:
 
     tree = rep.get("tree", {})
     fin_ = rep.get("fin", {})
+    ex_ = rep.get("export", {})
     heat = rep.get("heat", {})
     m4 = rep.get("m4", {})
     neww = rep.get("neww", {})
@@ -250,9 +251,21 @@ def main() -> int:
     # 财务筛选栏：年份 / 客户下拉、币种整组撤掉、导出收进一个菜单（前端改动也要过打包这关）
     chk("财务筛选栏：年份是下拉、币种组已撤",
         fin_.get("yearTag") == "SELECT" and fin_.get("ccySeg") == 0)
-    chk("导出下拉菜单（Excel / CSV / JSON / 打开目录）",
-        [x for x in (fin_.get("exportMenu") or []) if x] ==
-        ["导出 Excel（四张表）", "导出 CSV", "导出 JSON", "打开导出目录"])
+    chk("导出下拉菜单（导出… / 打开导出目录）",
+        [x for x in (fin_.get("exportMenu") or []) if x] == ["导出…", "打开导出目录"])
+    # 导出选项弹窗（范围 / 项目 / 内容 / 文件名预览）—— 打包后前端也得是同一份。
+    # ⚠ 只看界面：#exOk 会弹模态系统对话框，冒烟里不能点（smoke_fin_gui.py 有同样的注释）
+    chk("导出选项弹窗能打开、默认 Excel + 四项内容全勾",
+        ex_.get("dlg") is True and ex_.get("fmtAct") == "xlsx"
+        and ex_.get("secsOn") == ["records", "projects", "clients", "aging"])
+    chk("导出预览文件名是 board_finance_*.xlsx (%s)" % ex_.get("planName"),
+        str(ex_.get("planName") or "").startswith("board_finance")
+        and str(ex_.get("planName") or "").endswith(".xlsx"))
+    chk("导出弹窗：选指定项目出列表、选自定义出日期框",
+        ex_.get("prjShown") is True and (ex_.get("prjN") or 0) >= 1
+        and ex_.get("datesShown") is True)
+    chk("导出弹窗：CSV 锁成只导款项明细",
+        ex_.get("csvOn") == ["records"] and ex_.get("csvOff") == 4)
     chk("制作人字段打进包了（行里显示 + 菜单可改）",
         rep.get("artist", {}).get("tags") == 1)
     chk("拖拽 / 快照等 M4 功能可用", m4.get("moved") is True and m4.get("snapOk") is True)
@@ -266,10 +279,34 @@ def main() -> int:
     # 打包最容易漏的是「新增的模块」（node_spec）和「新绑的事件」——这两条就是冲着它们去的
     chk("新建项目弹窗：客户框是组合框 + 浏览已绑事件",
         neww.get("clientTag") == "INPUT" and neww.get("pickBound") is True)
+    # 截止日期：原生 date 框 + 空值时自绘的 YYYY/MM/DD
+    # （跟 smoke_fin_gui.py 同一套断言，改一侧必须两处一起改）
+    chk("截止日期是原生 date 框 + 空值时显示自绘「YYYY/MM/DD」（%s / %s / 显示=%s）"
+        % (neww.get("dueType"), neww.get("duePh"), neww.get("duePhShown")),
+        neww.get("dueType") == "date" and neww.get("duePh") == "YYYY/MM/DD"
+        and neww.get("duePhShown") is True)
+    chk("自绘占位不吃点击（点到的必须是输入框自己，%s）" % neww.get("duePhHit"),
+        neww.get("duePhHit") == "newDl")
+    chk("截止日期置 ISO 后落库（%s → %s）"
+        % (cr.get("dueIn"), cr.get("dueStored")), cr.get("dueStored") == "2026-12-31")
+    chk("有值时自绘占位收起、清空后回来（%s / %s）"
+        % (cr.get("duePhWithVal"), cr.get("duePhBack")),
+        cr.get("duePhWithVal") == "none" and cr.get("duePhBack") == "block")
+    chk("原生 date 框拒绝非法文本（下周三→%r、2026/12/31→%r）"
+        % (cr.get("rejectCn"), cr.get("rejectSlash")),
+        cr.get("rejectCn") == "" and cr.get("rejectSlash") == "")
     chk("客户框输入新名字会自动建客户（跨桥 + 落库）",
         cr.get("newClient") == "冒烟新客户X")
     chk("批量录入一行建出 6 个环节、重复批次全跳过（node_spec 打进包了）",
         nd.get("n") == 7 and nd.get("dupCreated") == 0 and nd.get("dupSkipped") == 6)
+    # 前端文案也算"打进包了"的一部分：热替换漏了某个文件、或打包收错目录都该被逮住
+    _hs = str(nd.get("hintSay") or "")
+    chk("弹窗文案随包发出：添加到 / 占位 / 空态 / 新说明句",
+        str(nd.get("toSay") or "").startswith("添加到：")
+        and nd.get("phSay") == "填写环节名称..."
+        and nd.get("emptySay") == "填写环节名称后，这里将展示。"
+        and "使用英文" in _hs and "英文双引号" in _hs
+        and "顿号" not in _hs and "名字里本来" not in _hs)
     chk("跑的是打包模式 (frozen=True)", tree.get("frozen") is True)
     # 通知身份：显式 AUMID 注册成功（pathinfo 回读的是系统真实值）。
     # 不设的话 Win11 通知显示「天在看.exe」+ fallback 图标（2026-10-01 蓝方块就是它）
@@ -289,10 +326,19 @@ def main() -> int:
     nf = fx.get("nodeFilter") or {}
     chk("子环节筛选框：有子环节的行上各有一个，带搜索框",
         nf.get("hasBtn") is True and nf.get("hasInput") is True
-        and nf.get("txtHit") is True and nf.get("txtTrimmed") is True)
+        and nf.get("txtHit") is True and nf.get("txtTrimmed") is True
+        and nf.get("txtNoLeak") is True)
     chk("子环节筛选：按状态筛完只剩该状态及其父环节、清除后恢复",
         (nf.get("feedbackRows") or 0) > 0 and nf.get("statKeepOk") is True
         and nf.get("statTrimmed") is True and nf.get("cleared") is True)
+    # 制作人反选的补集要带上「未分配」，否则没派工的环节会被一起吞掉（2026-10-04 用户报）
+    _nm = nf.get("multi") or {}
+    if _nm.get("hasWhoGroup") and _nm.get("noneInLayer"):
+        chk("制作人反选：补集含「未分配」且没人派工的环节还在屏幕上 (rows=%s)"
+            % (_nm.get("whoInvRows"),),
+            (_nm.get("whoInv") or [None])[-1] == ""
+            and _nm.get("noneKept") is True and _nm.get("whoDropped") is True
+            and _nm.get("noneRowShown") is True and _nm.get("noneRowTicked") is True)
 
     # 设置项逐项测定 / 多选批量 / 数据文件可设定（都是这一轮新加的）
     st = rep.get("settings") or {}
@@ -304,10 +350,15 @@ def main() -> int:
     chk("多选批量：点「多选」出现复选框、批量条露出来",
         (mu.get("pickAfter") or 0) >= 3 and mu.get("barAfter") == "flex")
     # 用户报的核心 bug：点复选框本身时勾选显示差一拍
-    chk("多选批量：点复选框本身当场显示勾、第二条不影响第一条",
-        (mu.get("pickClick1") or {}).get("ok") is True
-        and (mu.get("pickClick2") or {}).get("ok") is True
+    chk("多选批量：点复选框本身当场显示勾",
+        (mu.get("pickClick1") or {}).get("ok") is True)
+    # 2026-10-02 语义变更：直接点 = **单选**（第一条让位）；连点同一条 = 取消。
+    #   以前这里写的是"第二条不影响第一条"，恰好把累加 bug 当成了正确行为。
+    chk("多选批量：直接点第二条 = 单选（第一条让位）；再点同一条 = 全取消",
+        (mu.get("pickClick2") or {}).get("ok") is True
         and (mu.get("pickClick3") or {}).get("ok") is True)
+    chk("多选批量：Ctrl 点仍然是加选",
+        (mu.get("pickCtrl") or {}).get("ok") is True)
     chk("多选批量：状态色块是竖条（比老圆点醒目）", mu.get("dotOk") is True)
     chk("多选批量：点父环节级联选中它 + 全部后代、再点整棵撤掉",
         mu.get("hasParent") is True
@@ -323,13 +374,38 @@ def main() -> int:
         and not (mu.get("shiftDom") or {}).get("bad"))
     chk("多选批量：Shift 落在折叠箭头上也照常范围选",
         (mu.get("shiftTw") or {}).get("ok") is True)
+    chk("多选批量：Shift 点**复选框**也要能范围选（只点整行才认的 bug）",
+        (mu.get("shiftCp") or {}).get("ok") is True)
+    # 2026-10-02 新增：改**任意一条选中项**的状态 / 制作人 → 所有选中项一起改
+    chk("多选批量：点选中项的状态徽章 → 选中的全都改成同一个状态",
+        (mu.get("rowStat") or {}).get("ok") is True)
+    chk("多选批量：点选中项的「制作人」→ 选中的全都改成同一个制作人",
+        (mu.get("rowArtist") or {}).get("ok") is True)
+    # 2026-10-03 新增：截止日期 / 备注接进同一套批量改法（跟 smoke_fin_gui 同一套）
+    chk("多选批量：点选中项的「截止日期」→ 选中的全都改成同一个日期",
+        (mu.get("rowDue") or {}).get("ok") is True)
+    chk("多选批量：点选中项的「备注」→ 选中的全都改成同一个备注",
+        (mu.get("rowNote") or {}).get("ok") is True)
+    _k = mu.get("rowStatKeep") or {}
+    chk("多选批量：点状态徽章不会把选择集清掉（实际剩 %s / 应剩 %s）"
+        % (_k.get("sel"), _k.get("want")),
+        _k.get("ok") is True)
     # 「全选本层」按用户要求撤掉了，改由点父级自带级联。
     # 采回批量条上真实存在的按钮来断言：既确认"全选"没被加回来，也能发现少了谁。
+    _bl = mu.get("barLayout") or {}
+    chk("多选批量：批量条一行排完，「退出多选」在「清空」右边（实际=%s）" % (_bl,),
+        _bl.get("ok") is True)
+    chk("多选批量：一条没选时计数整段留白、不写「还没选」",
+        _bl.get("cntWhenNone") == "")
+    _bs = mu.get("barSticky") or {}
+    chk("多选批量：树往下滚时批量条粘在内容区顶部、不被行盖住（实际=%s）" % (_bs,),
+        _bs.get("ok") is True)
     _bb = mu.get("bulkBtns") or []
-    chk("多选批量：批量条就这四颗按钮、没有「全选本层」（实际=%s）" % (_bb,),
-        len(_bb) == 4
+    chk("多选批量：批量条就这六颗按钮、没有「全选本层」（实际=%s）" % (_bb,),
+        len(_bb) == 6
         and not any("全选" in t for t in _bb)
-        and all(any(k in t for t in _bb) for k in ("状态", "制作人", "清空", "退出")))
+        and all(any(k in t for t in _bb)
+                for k in ("状态", "制作人", "截止日期", "备注", "清空", "退出")))
     chk("多选批量：改状态真的落库（勾的几条全变了）", mu.get("statOk") is True)
     chk("多选批量：改制作人真的落库", mu.get("artistOk") is True)
     chk("多选批量：退出后复选框消失", mu.get("pickGone") == 0)
@@ -343,12 +419,21 @@ def main() -> int:
         and dbf.get("sync") is True and dbf.get("syncBar") == 1)
 
     # 客户删除（与 smoke_fin_gui.py 同一套断言，改一侧必须两处一起改）
+    # 入口已从弹窗底部挪到列表行右边的 ⋯ 菜单（2026-10-04）
     cl = rep.get("clients") or {}
-    chk("客户删除：面板刚打开时按钮收着（新建态）、打开可编辑、删得掉、有项目挂靠删不掉",
-        cl.get("opened") is True and cl.get("delHiddenFresh") is True
-        and cl.get("made") is True and cl.get("rowFound") is True
-        and cl.get("delShownEdit") is True and cl.get("nameFilled") is True
-        and cl.get("delOk") is True
+    chk("客户弹窗：底部删除按钮撤了、结算周期提示撤了、每行都有 ⋯",
+        cl.get("opened") is True and cl.get("delBtnGone") is True
+        and cl.get("subGone") is True and (cl.get("ops") or 0) > 0
+        and cl.get("rows") == cl.get("ops"))
+    chk("⋯ 菜单里有「编辑客户」「删除客户」，且菜单画在弹窗之上（z=%s）"
+        % (cl.get("popZ"),),
+        cl.get("hasEdit") is True and cl.get("hasDel") is True
+        and (cl.get("popZ") or 0) > 200)
+    chk("「删除客户」染红、跟「编辑客户」不同色（%s）" % (cl.get("delColor"),),
+        cl.get("delRed") is True)
+    chk("编辑客户仍能进编辑态、删除客户删得掉、有项目挂靠删不掉",
+        cl.get("made") is True and cl.get("nameFilled") is True
+        and cl.get("saveTxt") == "更新客户" and cl.get("delOk") is True
         and cl.get("busyBlocked") is True and cl.get("stillRefused") is True)
 
     base = os.path.abspath(tree.get("base") or "")

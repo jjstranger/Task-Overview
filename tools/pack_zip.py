@@ -16,6 +16,11 @@
 后者一旦哪天冒烟又落了新东西在里面，会静默跟着进包。
 
 产物名与版本号都从 `app/version.py` 取，不在工具里再抄一份。
+
+文件名默认**带构建时间戳**（`天在看_v1.1_20261002-0433.zip`）：
+同版本号会被反复打包（改了几行前端就重出一版），如果名字固定，
+拷给别人时两边都是"同一个 zip"，很难说清谁新谁旧 —— 收的人最容易拿错。
+要固定名字（比如做 CI 产物）加 `--nostamp`。
 """
 from __future__ import annotations
 
@@ -63,6 +68,8 @@ def collect(src: str) -> list[tuple[str, str]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="把 dist 下的 exe 产物打成 zip")
     ap.add_argument("--outdir", default="", help="zip 落目录，默认 dist/")
+    ap.add_argument("--nostamp", action="store_true",
+                    help="文件名不带时间戳（默认带）")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -73,7 +80,10 @@ def main() -> int:
 
     outdir = args.outdir or os.path.join(ROOT, "dist")
     os.makedirs(outdir, exist_ok=True)
-    zip_path = os.path.join(outdir, "%s_v%s.zip" % (EXE_STEM, VERSION))
+    # 时间戳取「打包这一刻」而非 exe 的构建时间：
+    # 同一次构建也可能重打好几份（换黑名单、换 outdir），用 now 才能分开它们。
+    stamp = "" if args.nostamp else "_" + time.strftime("%Y%m%d-%H%M%S")
+    zip_path = os.path.join(outdir, "%s_v%s%s.zip" % (EXE_STEM, VERSION, stamp))
 
     raw = sum(os.path.getsize(p) for p, _ in items)
     print("[1/2] 收集 %d 个文件，%.1f MB" % (len(items), raw / 1024 / 1024))

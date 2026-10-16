@@ -160,28 +160,45 @@ footer{display:flex;gap:16px;padding:7px 14px;border-top:1px solid var(--line);b
 .popup div.acts button:hover{border-color:var(--blue);color:var(--blue)}
 
 .ov{position:fixed;inset:0;background:rgba(8,8,10,.66);display:none;align-items:center;justify-content:center;z-index:200}
-.ovbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;width:440px;max-height:86%;overflow:auto}
+/* ⚠ `flex:none` 不能省：`.ov` 是 flex 容器，弹窗是它的 flex item，
+   少了这句窗口变窄时**弹窗本身会被压扁**（宽度小于设定的 520/580），
+   里面的行跟着挤、文字就折了。max-width 是给极窄窗口兜底（别顶出屏幕）。 */
+.ovbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;width:440px;max-height:86%;overflow:auto;flex:none;max-width:92vw}
 .ovbox h3{font-size:14px;font-weight:500;margin-bottom:4px}
 .ovbox p.sub{font-size:12px;color:var(--tx2);margin-bottom:12px}
 .fld{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line);font-size:12px}
 .fld .lb{width:86px;color:var(--tx2);flex:none}
 .fld .vl{flex:1;color:var(--tx3);font-size:11px;word-break:break-all}
+/* 金额 / 税率% / 税后提示三个控件挤在同一行（新建项目页的「合同额」、记一笔的「金额」）。
+   2026-10-13 用户反馈这行文字换行、难看。实测根因是**余量正好为 0**：
+   `.ovbox` 是 `max-height:86%` + `overflow:auto`，窗口一矮就冒出纵向滚动条，
+   白吃 15px —— 行里的小字「税率%」随即被拆成「税率」和「%」两行，
+   整行高度从 50px 涨到 67px。默认的 760 高窗口不出滚动条，所以一直没被发现。
+   处理：① 两个弹窗加宽到 580（见 index.html）；② 这行的小字一律 nowrap，
+   宁可横向溢出也不把「税率%」拆开；③ 保持 .fld 的 nowrap，不整块掉到下一行。 */
+.fld.amtrow .lb,.fld.amtrow .hint{white-space:nowrap}
 input[type=text],input[type=date],input[type=time]{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12px;width:100%}
-/* 截止日期：原生 date 框在中文下空值时画的是「yyyy/mm/日」。那段文字在 UA shadow DOM 里，
+/* 原生 date 框：中文下空值时画的是「yyyy/mm/日」。那段文字在 UA shadow DOM 里，
    页面拿不到也改不了（lang 属性实测无效），只能让它**空值且未聚焦**时透明，
    再用自绘的 .dph 顶上 —— 日历图标不受影响，仍在框右边。
    ⚠ 有值时不能透明：那时原生画的就是 2026/12/31，正是要的格式。
    ⚠ 聚焦时也不能透明：用户正打字，得看得见自己输的数字。
+   ⚠ .hav 由 JS 维护（app.js 的 bindDph）—— date 框不支持 :placeholder-shown，
+     纯 CSS 判不出"有没有值"。
+   2026-10-13 起按 .dwrap 泛化（原本只钉 #newDl）：新建/设置页的四个日期框共用一套。
    ⚠ 想从 JS 验这条规则是做不到的：外链样式表在 file:// 下读 cssRules 抛 SecurityError，
      而 getComputedStyle(el,"::-webkit-datetime-edit") 返回的是**元素自身**样式（实测），
      会永远"看着对"。所以"透明真生效"只靠截图验：tests/_diag/check_datefield.py。 */
 .dwrap{position:relative}
 .dwrap .dph{position:absolute;left:9px;top:50%;transform:translateY(-50%);
   font-size:12px;color:var(--tx3);pointer-events:none;display:none}
-#newDl:not(.hav):not(:focus)::-webkit-datetime-edit{color:transparent}
-#newDl:not(.hav):not(:focus) ~ .dph{display:block}
+.dwrap input[type=date]:not(.hav):not(:focus)::-webkit-datetime-edit{color:transparent}
+.dwrap input[type=date]:not(.hav):not(:focus) ~ .dph{display:block}
 input.w{width:60px}
 .hint{font-size:11px;color:var(--tx3);line-height:1.5}
+/* 「税后」提示是算出来的数字，比字段名（.hint 的 tx3）亮一档才看得见；
+   它只在填了税率时才有内容，空着的时候是个空 span（不占位、不画东西） */
+.hint.net{color:var(--tx2)}
 .hint code,.prev code{background:var(--rowalt);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:11px}
 .fld.top{align-items:flex-start}
 .fld textarea{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;
@@ -265,6 +282,15 @@ input.w{width:60px}
 .fsec{margin-top:18px}
 .fsecth{font-size:12px;color:var(--tx2);padding-bottom:6px;border-bottom:1px solid var(--line);margin-bottom:2px;display:flex;gap:8px;align-items:baseline}
 .fsecth .fk{font-size:11px;color:var(--tx3)}
+/* 财务页四组数据的标签页（2026-10-16）：一个 .fsec 里只露一组，省纵向空间。
+   故意用**下划线**而不是 .seg 那种填充块 —— 它切的是"看哪张表"（页签性质），
+   不是"选哪个值"（开关性质），两种语义不该长得一样。
+   `margin-bottom:-1px` 是把下划线压到容器的那条 border-bottom 上，重合不留缝。 */
+.ftabs{display:flex;gap:2px;border-bottom:1px solid var(--line)}
+.ftabs button{border:none;border-bottom:2px solid transparent;border-radius:6px 6px 0 0;
+  padding:5px 12px;color:var(--tx3);margin-bottom:-1px}
+.ftabs button:hover{color:var(--tx)}
+.ftabs button.act{color:var(--blue);border-bottom-color:var(--blue)}
 .ftrow{display:grid;grid-template-columns:1.6fr 1fr .75fr .8fr .75fr .85fr .8fr .8fr 22px;gap:8px;
   align-items:center;padding:6px 6px;border-bottom:1px solid var(--line);border-radius:6px}
 .ftrow.head{color:var(--tx3);font-size:11px;border-bottom:1px solid var(--tx3)}

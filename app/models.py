@@ -34,12 +34,15 @@ CLOSED_ALL = NODE_CLOSED + PROJECT_CLOSED
 # 早先进度只认 done，用户把环节改成「通过/交付」后进度条始终是 0，就是这个原因。
 NODE_DONE = ("通过", "交付")
 
-# 「不用再催停滞」的项目状态。
+# 「不用再催停滞」的项目状态（2026-10-13 从 2 个扩到 4 个）。
 # ⚠ 判定必须**只有一处实现**：底栏「停滞 N」（stats）、告警列表（alerts）、
 # 行上的「停滞」小标（前端 app.js:isStale）三个地方看得见同一个数，
 # 各写一套的话底栏说 3 个、点开明细只有 2 个 —— 用户第一反应是"数据不对"。
 # 前端那份只能逐字对齐，改这里要一起改（冒烟里钉着三处口径一致）。
-STALE_SKIP = ("已结款", "归档")
+#   · 筹备   —— 还没开工，谈不上"停滞"（2026-10-13 用户报的）
+#   · 已交付 —— 制作这条线结束了，改盯「结款逾期」（settle_gap），不再报停滞
+#   · 已结款 / 归档 —— 收工态
+STALE_SKIP = ("筹备", "已交付", "已结款", "归档")
 
 # 老库迁移：旧环节状态词 → 新词，表定义在 db.py（`Db._connect` 每次开库跑一遍，幂等）
 
@@ -122,15 +125,46 @@ def _days_left(d: str) -> int | None:
         return None
 
 
+# 交付之后要盯的不再是"做完没有"，而是"钱到了没有"。已交付项目用
+# 用户手填的 `settle_date`（约定结款日）算「结款逾期 N 天」，替代「制作逾期」。
+SETTLE_STATUS = "已交付"
+
+
+def settle_gap(settle_date: str) -> int | None:
+    """已交付项目「结款逾期」几天 = 约定结款日 → 今天；算不出来 → None。
+
+    **全工程唯一的结款逾期判据**：底栏「临期/逾期 N」（stats）、告警列表
+    （alerts）、行上那颗红字（前端 app.js:dueTag）看的必须同一个数。
+
+    只认用户填的「结款日期」。**不再拿交付日期推算**（2026-10-13 用户定的）：
+    上一版试过用 `delivered_at` 兜底，结果老项目会凭空冒出一个"逾期"，而那些
+    天数跟合同里说的结款日毫无关系。现在没填就是不报 —— 想盯就去项目设置里填。
+
+    结款当天不算（`days_left == 0`）—— 当天就催太吵，从第 1 天起算。
+    """
+    d = _days_left(settle_date)
+    if d is None or d >= 0:
+        return None
+    return -d
+
+
+def _settle_label(days: int) -> str:
+    """结款逾期的文案。跟 `_due_label()` 一样，**前端必须逐字一致**。"""
+    return "结款逾期 %d 天" % days
+
+
 def _due_label(days_left: int) -> str:
     """到期提醒的文案。
 
     「D-1」「今天」这种记号看着像密码 —— 用户得先知道 D 是 deadline 才读得懂，
     所以一律写成整句话。**前端 `dueTag()` 必须跟这里逐字一致**：
     同一个数字在两处（行上的小标、告警面板）显示成两种说法最容易让人怀疑数据不对。
+
+    逾期那条 2026-10-13 从「逾期 N 天」改成「制作逾期 N 天」—— 已交付项目
+    报的是「结款逾期 N 天」，两个"逾期"并排出现时得一眼看出是哪个环节的。
     """
     if days_left < 0:
-        return "逾期 %d 天" % (-days_left)
+        return "制作逾期 %d 天" % (-days_left)
     if days_left == 0:
         return "今天到期"
     return "%d 天后到期" % days_left
@@ -155,7 +189,14 @@ class Board:
             )
 
         nodes_by_parent: dict[tuple[int, int | None], list] = {}
-        for r in self.db.q("SELECT * FROM nodes ORDER BY sort_order,id"):
+        # 制作人从 vendors JOIN 出显示名（2026-10-16 起强关联，裸文本列不再读）。
+        # ⚠ 对外仍然发一个叫 `artist` 的键（值是名字）—— 前端筛选、搜索、
+        # 行上显示全都在读 `n.artist`，名字语义不变就一处都不用改。
+        for r in self.db.q(
+            "SELECT n.*, v.name AS vendor FROM nodes n "
+            "LEFT JOIN vendors v ON v.id=n.artist_id "
+            "ORDER BY n.sort_order, n.id"
+        ):
             nodes_by_parent.setdefault((r["project_id"], r["parent_id"]), []).append(r)
 
         def build(pid: int, parent_id: int | None) -> list:
@@ -171,7 +212,9 @@ class Board:
                         "collapsed": r["collapsed"],
                         "deadline": _s(r["deadline"]),
                         "note": _s(r["note"]),
-                        "artist": _s(r["artist"]),
+                        "artist": _s(r["vendor"]),
+                        # 未分配判据 / 选人回填都看它（NULL = 未分配）
+                        "artist_id": r["artist_id"],
                         "last_activity_at": _s(r["last_activity_at"]),
                         "links": links.get(("node", r["id"]), []),
                         "children": build(pid, r["id"]),
@@ -184,8 +227,9 @@ class Board:
         # 必须两条都认 —— 只认字段的话，状态归档的项目照样冒出来，开关看着像坏了。
         projects = []
         for r in self.db.q(
-            "SELECT p.*, c.name AS client FROM projects p "
+            "SELECT p.*, c.name AS client, v.name AS vendor FROM projects p "
             "LEFT JOIN clients c ON c.id=p.client_id "
+            "LEFT JOIN vendors v ON v.id=p.artist_id "
             "WHERE ((p.archived=0 AND p.status<>'归档') OR ?) "
             "ORDER BY p.pinned DESC, p.sort_order, p.id",
             (1 if include_archived else 0,),
@@ -201,8 +245,11 @@ class Board:
                     "client_id": r["client_id"],
                     "priority": r["priority"],
                     "deadline": _s(r["deadline"]),
+                    # 约定结款日：「结款逾期 N 天」的唯一依据（只有项目层有这个概念）
+                    "settle_date": _s(r["settle_date"]),
                     "note": _s(r["note"]),
-                    "artist": _s(r["artist"]),
+                    "artist": _s(r["vendor"]),
+                    "artist_id": r["artist_id"],
                     "collapsed": r["collapsed"],
                     "last_activity_at": _s(r["last_activity_at"]),
                     "links": links.get(("project", r["id"]), []),
@@ -224,6 +271,7 @@ class Board:
             "stats": self.stats(groups),
             "settings": self.db.all_settings(),
             "clients": self.clients(),
+            "vendors": self.vendors(),
         }
 
     def stats(self, groups=None) -> dict:
@@ -240,11 +288,20 @@ class Board:
             return max([v for v in vals if v], default="")
 
         def count_due(node) -> int:
-            """这棵子树里「临期 / 逾期」的条数（关闭判定跟 alerts() 的 due 同一套）。"""
+            """这棵子树里「临期 / 逾期」的条数（关闭判定跟 alerts() 的 due 同一套）。
+
+            已交付的项目不算「制作逾期」，改算「结款逾期」—— 两种都进这个数，
+            底栏那个 N 才是"还有几件事要催"。没填结款日期就不算（老项目）。
+            """
             n = 0
-            d = _days_left(node.get("deadline"))
-            if d is not None and d <= 3 and node.get("status") not in CLOSED_ALL:
-                n += 1
+            st = node.get("status")
+            if st == SETTLE_STATUS:
+                if settle_gap(node.get("settle_date")) is not None:
+                    n += 1
+            elif st not in CLOSED_ALL:
+                d = _days_left(node.get("deadline"))
+                if d is not None and d <= 3:
+                    n += 1
             for c in node.get("children", []):
                 n += count_due(c)
             return n
@@ -286,6 +343,25 @@ class Board:
         return [
             {"id": r["id"], "name": r["name"], "settlement_cycle": _s(r["settlement_cycle"])}
             for r in self.db.q("SELECT * FROM clients ORDER BY id")
+        ]
+
+    def vendors(self) -> list:
+        """外包商 / 制作人名录（2026-10-16）。
+
+        它同时是「项目 / 环节的制作人」和「外包支出的收款方」，所以归在 Board
+        而不是 finance —— 财务只是它的两个使用方之一。顺序按名字排（人不多，
+        按名找比按建库顺序找顺手）。
+        """
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                # 老（迁移）条目和手工改库都可能留下空 kind，兜成「个人」
+                "kind": _s(r["kind"]) or "个人",
+                "contact": _s(r["contact"]),
+                "note": _s(r["note"]),
+            }
+            for r in self.db.q("SELECT * FROM vendors ORDER BY name, id")
         ]
 
     # ---------- 分类（分组） ----------
@@ -468,6 +544,9 @@ class Board:
         table = "projects" if kind == "project" else "nodes"
         row = self.db.one(f"SELECT title,project_id FROM {table} WHERE id=?", oid) if kind == "node" \
             else self.db.one("SELECT title,id AS project_id FROM projects WHERE id=?", oid)
+        # 上一版这里会顺手给项目打一个「交付日期」（delivered_at）当结款逾期的起算点。
+        # 2026-10-13 起结款逾期只认用户填的 settle_date，这条自动时间戳就不再写了 ——
+        # 「什么时候交的货」跟「合同说好什么时候结款」本来就是两件事。
         self.db.run(
             f"UPDATE {table} SET status=?, updated_at=?, last_activity_at=? WHERE id=?",
             (status, now(), now(), oid),
@@ -512,9 +591,15 @@ class Board:
     def set_field(self, kind: str, oid: int, field: str, value) -> None:
         table = "projects" if kind == "project" else "nodes"
         allowed = {
-            "projects": {"deadline", "note", "artist", "priority", "pinned",
-                         "client_id", "category", "archived"},
-            "nodes": {"deadline", "note", "artist", "sort_order"},
+            # settle_date（结款日期）界面上**只有一个**入口：项目的「项目设置」页。
+            # 它决定已交付项目的「结款逾期 N 天」怎么算，填错比不填更误导 ——
+            # 所以不给行内点改，也不进批量改。
+            # artist_id（2026-10-16 起取代裸文本的 artist）：值是 vendors.id，
+            # None = 清空（未分配）。项目层走「项目设置」页，环节层走行上点选 +
+            # 多选批量，两条路都落到这一个字段上。
+            "projects": {"deadline", "note", "artist_id", "priority", "pinned",
+                         "client_id", "category", "archived", "settle_date"},
+            "nodes": {"deadline", "note", "artist_id", "sort_order"},
         }[table]
         if field not in allowed:
             raise ValueError(f"字段不可写：{field}")
@@ -529,6 +614,12 @@ class Board:
     def bulk_update(self, ids, status=None, artist=None,
                     deadline=None, note=None) -> dict:
         """多选批量改环节的「状态 / 制作人 / 截止日期 / 备注」。
+
+        ⚠ `artist` 的语义 2026-10-16 起变了：以前是**名字字符串**，现在是
+        **vendors.id**（假值 = 清空成未分配）。参数名没改是为了不动桥接口，
+        但前端必须传 id —— 传名字会静默写成 NULL（int("张三") 抛异常 → 这里
+        没兜，会整批失败，所以不会静默）。「手输一个…」那条路已经撤掉：
+        制作人强关联后不能再凭空造一个不存在的名字。
 
         逐个走 set_status / set_field 而不是拼一条 UPDATE，是为了让**活跃度口径**
         自动保持一致：环节流转到 NODE_ACTIVE_STATUS 里的状态才计活跃、
@@ -559,7 +650,9 @@ class Board:
                 if status is not None:
                     self.set_status("node", nid, str(status))
                 if artist is not None:
-                    self.set_field("node", nid, "artist", str(artist))
+                    # 传进来的是 vendors.id；0 / "" / None 一律当「清空」
+                    self.set_field("node", nid, "artist_id",
+                                   int(artist) if artist else None)
                 if deadline is not None:
                     self.set_field("node", nid, "deadline", str(deadline))
                 if note is not None:
@@ -574,6 +667,85 @@ class Board:
             return {"ok": False, "done": 0, "skipped": len(want), "msg": str(exc)}
         return {"ok": True, "done": done, "skipped": skipped, "msg": msg}
 
+    def bulk_delete(self, ids) -> dict:
+        """多选批量删环节（连带各自的后代 + 目录链接），一个事务里做完。
+
+        为什么单独开一个方法而不是前端循环调 delete()：
+          * N 次跨桥往返，库在网络盘上时一次写就够慢了，几十条会明显卡；
+          * 中途失败留半拉子（删了一半），用户看不出删到哪了；
+          * **重复计数**：多选是级联选（点父项连带整棵子树），
+            所以 ids 里常常**祖先和后代同时在**。逐个 delete 的话，
+            删完祖先再删后代时，后代其实已经不在了 —— 得靠
+            "先查还在不在"绕过去，很别扭。这里一次性算清。
+
+        做法：把每个 id 的整棵子树展开、去重 → 最后一条 DELETE 干掉。
+        done 报的是**真正从库里消失的条数**（含被祖先带走的后代），
+        不是用户勾了几条 —— 界面上说"删了 N 条"要跟实际对得上。
+        """
+        want = []
+        for i in ids or []:
+            try:
+                want.append(int(i))
+            except Exception:
+                continue
+        want = list(dict.fromkeys(want))                 # 去重且保序
+        if not want:
+            return {"ok": False, "done": 0, "skipped": 0, "msg": "没选环节"}
+
+        d = self.db
+        all_ids: set[int] = set()
+        skipped = 0
+        for nid in want:
+            row = d.one("SELECT id FROM nodes WHERE id=?", nid)
+            if not row:
+                skipped += 1                             # 已经不在了（别的窗口删过）
+                continue
+            acc: list[int] = []
+
+            def collect(i: int, acc: list):              # 照抄 delete() 的写法
+                acc.append(i)
+                for r in d.q("SELECT id FROM nodes WHERE parent_id=?", i):
+                    collect(r["id"], acc)
+
+            collect(nid, acc)
+            all_ids.update(acc)
+
+        if not all_ids:
+            return {"ok": False, "done": 0, "skipped": skipped,
+                    "msg": "这些环节已经不在了，刷新一下看看"}
+
+        ids_list = sorted(all_ids)
+        marks = ",".join("?" * len(ids_list))
+        # 受影响的项目：删完要 _touch（跟 delete() 口径一致：删环节算这条项目的动静）
+        projs = set()
+        for r in d.q(f"SELECT DISTINCT project_id FROM nodes WHERE id IN ({marks})",
+                     tuple(ids_list)):
+            projs.add(r["project_id"])
+
+        try:
+            # ⚠ 库是 `isolation_level=None`（autocommit）—— **必须显式 BEGIN**，
+            #   否则两条 DELETE 各自提交，中途失败就留半拉子；
+            #   而且没有活动事务时 COMMIT 会直接报
+            #   "cannot commit - no transaction is active"（2026-10-10 踩过）。
+            with d.mutex:
+                d.conn.execute("BEGIN")
+                d.conn.execute(f"DELETE FROM nodes WHERE id IN ({marks})", tuple(ids_list))
+                d.conn.execute(
+                    f"DELETE FROM links WHERE owner_type='node' AND owner_id IN ({marks})",
+                    tuple(ids_list),
+                )
+                d.conn.execute("COMMIT")
+                d.touch()
+        except Exception as exc:
+            try:
+                with d.mutex:
+                    d.conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            return {"ok": False, "done": 0, "skipped": len(want), "msg": str(exc)}
+        for pid in projs:
+            self._touch(pid)
+        return {"ok": True, "done": len(ids_list), "skipped": skipped, "msg": None}
 
     # ---------- 排序与折叠（M4） ----------
 
@@ -770,7 +942,39 @@ class Board:
     def delete_link(self, oid: int) -> None:
         self.db.run("DELETE FROM links WHERE id=?", (oid,))
 
+    def reset_priority(self, keep: set[int] | None = None) -> None:
+        """把「今日必做」标记重置成 `keep` 这一批（其余全部清 0）。
+
+        ⚠ 为什么要有这个：`priority` 以前**只加不减** —— 打卡时前端对勾选项写 1，
+        却从来没有写回 0 的路径。而打卡弹窗又默认勾选 `priority=1` 的项（让"沿用昨天"
+        看起来像"今天重新确认"），两者叠加就成了自我延续：**只要打过一次卡，
+        那个项目就永远挂着「今日必做」**，只能一个个去 ⋯ 菜单手动取消
+        （用户 2026-10-09 报的就是这个）。
+
+        现在语义改成「打卡 = 重新声明今天要推进哪些」：
+        确认打卡时先整体清 0，再把本次勾上的置 1 —— 标记的存活期重新变回"一天"。
+
+        `keep=None` / 空集合 = 全部清空。**只动 priority，不碰活跃度**（活跃流水
+        仍由 checkin() 按勾选项逐条记）。
+        """
+        ids = sorted({int(i) for i in (keep or set())})
+        placeholders = ",".join("?" * len(ids))
+        sql = "UPDATE projects SET priority=0, updated_at=?"
+        params: list = [now()]
+        if ids:
+            sql += f" WHERE id NOT IN ({placeholders})"
+            params += ids
+        self.db.run(sql, tuple(params))
+        if ids:
+            self.db.run(
+                "UPDATE projects SET priority=1, updated_at=?"
+                f" WHERE id IN ({placeholders})",
+                tuple([now()] + ids),
+            )
+
     def checkin(self, items: list) -> None:
+        items = items or []
+        logged = False
         for it in items:
             pid = int(it.get("id") or 0)
             if not pid:
@@ -778,6 +982,25 @@ class Board:
             title = it.get("title") or ""
             self.db.log("checkin", W_ACT, f"打卡 {title}", project_id=pid)
             self._touch(pid)
+            logged = True
+        if not logged:
+            # 一个项目都没勾也得落一条流水。
+            #
+            # ⚠ `checked_in_today()` 认的是「今天有没有 kind='checkin' 的行」，
+            #   不是任何内存标志。没有这一行，提醒线程每 nag_minutes 就会继续弹
+            #   —— 用户点了「确认打卡」、弹窗关了、然后照样被催，看着就像程序坏了
+            #   （2026-10-09 报的）。
+            # ⚠ 权重必须是 W_IDLE，不能用 W_ACT：`activity()` 是
+            #   `SUM(weight) WHERE weight>0`，写 1 会给当天热力图白送一分活跃；
+            #   而"一个都不勾"恰恰是今天**没有**推进任何产出的声明。
+            #   流水本身照写（活跃页列表可查），这与「不计活跃 = 写 0 而不是不写」
+            #   的全局口径一致（见 W_ACT / W_IDLE 注释）。
+            self.db.log("checkin", W_IDLE, "打卡（未勾选项目）")
+        # 打卡 = 今天的声明：把「今日必做」重置成本次勾选的这批（见 reset_priority）。
+        # ⚠ 放在**最后**：清 0 的 UPDATE 会碰所有项目、也会更新 updated_at，
+        #   若它先跑，_touch() 写下的 last_activity_at 会被覆盖成同一个值 ——
+        #   现在这样能保住"活跃时间 = 打卡那一刻"的语义。
+        self.reset_priority({int(it.get("id") or 0) for it in items})
 
     # ---------- 活跃与告警（M2） ----------
 
@@ -930,13 +1153,27 @@ class Board:
 
         due: list[dict] = []
         for r in self.db.q(
-            "SELECT 'project' AS t, p.id, p.title, p.deadline, p.status, p.title AS prj"
-            " FROM projects p WHERE p.archived=0 AND p.deadline IS NOT NULL AND p.deadline<>''"
+            "SELECT 'project' AS t, p.id, p.title, p.deadline, p.status, p.title AS prj,"
+            " p.settle_date"
+            " FROM projects p WHERE p.archived=0 AND ((p.deadline IS NOT NULL AND p.deadline<>'')"
+            " OR (p.status='已交付' AND p.settle_date IS NOT NULL AND p.settle_date<>''))"
             " UNION ALL "
-            "SELECT 'node', n.id, n.title, n.deadline, n.status, p.title"
+            "SELECT 'node', n.id, n.title, n.deadline, n.status, p.title, NULL"
             " FROM nodes n JOIN projects p ON p.id=n.project_id"
             " WHERE n.deadline IS NOT NULL AND n.deadline<>''"
         ):
+            # 已交付的项目走另一条线：制作结束了，该催的是钱（结款逾期）。
+            # ⚠ 它必须在 CLOSED_ALL 那一跳**之前**分出来 —— 已交付也在收工态里。
+            if r["status"] == SETTLE_STATUS:
+                g = settle_gap(r["settle_date"])
+                if g is None:
+                    continue
+                due.append(
+                    {"kind": "due", "settle": True, "title": r["title"],
+                     "detail": _settle_label(g), "project": _s(r["prj"]),
+                     "days": -g, "owner": "project", "id": r["id"]}
+                )
+                continue
             if r["status"] in CLOSED_ALL:
                 continue
             d = _days_left(r["deadline"])
@@ -944,10 +1181,11 @@ class Board:
                 continue
             label = _due_label(d)
             due.append(
-                {"kind": "due", "title": r["title"], "detail": label,
+                {"kind": "due", "settle": False, "title": r["title"], "detail": label,
                  "project": _s(r["prj"]), "days": d,
                  "owner": r["t"], "id": r["id"]}
             )
+        # 越逾期越靠前：制作逾期是负数、结款逾期也换算成负数（-g），同一把尺子排
         due.sort(key=lambda x: x["days"])
         return {"stale": stale, "due": due, "total": len(stale) + len(due)}
 

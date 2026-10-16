@@ -85,6 +85,54 @@ def main() -> int:
     assert any(r["kind"] == "checkin" for r in act["recent"]), act["recent"]
     assert str(dt.date.today().year) in act["years"]
 
+    # ---------- 打卡 = 重置「今日必做」（2026-10-09 用户口径）----------
+    # 以前 priority 只加不减：打过一次卡就永久挂着，只能去 ⋯ 菜单手动取消。
+    # 现在每次确认打卡，标记**恰好**等于本次勾选的这批。
+    p2 = int(board.add_project("重置验证-B", "商业") or 0)
+    p3 = int(board.add_project("重置验证-C", "商业") or 0)
+    assert p2 and p3
+    board.set_field("project", p2, "priority", 1)
+    board.set_field("project", p3, "priority", 1)
+    assert board.priority_count() == 3, board.priority_count()   # pid + p2 + p3
+
+    # 只勾 pid 打卡 → p2/p3 的旧标记必须被清掉
+    board.checkin([{"id": pid, "title": "只勾这一个"}])
+    assert board.priority_count() == 1, board.priority_count()
+    rows = {r["id"]: r["priority"] for r in board.db.q("SELECT id,priority FROM projects")}
+    assert rows[pid] == 1, rows
+    assert rows[p2] == 0 and rows[p3] == 0, rows
+
+    # 校验「活跃时间 = 打卡那一刻」没被 reset 的 updated_at 覆盖
+    assert board.set_field("project", p2, "priority", 1) is None
+    board.set_field("project", p2, "priority", 0)
+
+    # 一个都不勾 → 标记全清，但**仍要落一条流水**（2026-10-09 改）
+    # `checked_in_today()` 认的是「今天有没有 kind='checkin' 的行」，没有这行
+    # 提醒线程会一直催 —— 用户点完「确认打卡」还接着被弹，看着像坏了。
+    def count_checkin() -> int:
+        """打卡流水的条数 —— 用来验证「空勾选也落了一条」。"""
+        return board.db.q(
+            "SELECT COUNT(*) AS n FROM activity_log WHERE kind='checkin'")[0]["n"]
+
+    before = count_checkin()
+    board.checkin([])
+    assert board.priority_count() == 0, board.priority_count()
+    assert count_checkin() == before + 1, ("空勾选也要落一条 checkin 流水",
+                                           before, count_checkin())
+    last = board.db.q("SELECT kind,weight,detail FROM activity_log ORDER BY id DESC LIMIT 1")[0]
+    # ⚠ 权重必须是 0：activity() 只 SUM(weight>0)，写 1 会给热力图白送一分活跃
+    assert last["kind"] == "checkin" and last["weight"] == 0, last
+    assert board.checked_in_today() is True
+
+    # 空 items / 脏 id 走同一条路（后端 `items or []`）
+    before = count_checkin()
+    board.checkin([{"id": 0, "title": "脏数据"}])
+    assert count_checkin() == before + 1, ("id 无效同样落到空流水分支",
+                                           before, count_checkin())
+
+    # 回填：后面的断言依赖 pid 带着 priority
+    board.set_field("project", pid, "priority", 1)
+
     # ---------- 变更记录只取最近一周 + 翻页接口（2026-09-30）----------
     # 流水是只增不减的表。面板只该列最近 7 天，其余走 activity_logs 分页。
     db.run("DELETE FROM activity_log")
@@ -142,7 +190,9 @@ def main() -> int:
 
     # 到期文案一律写整句话（2026-09-30 用户要求：「D-1」「今天」得像密码才读得懂）。
     # 前端 dueTag() 跟这里是同一套说法，两处对不上最容易让人怀疑数据不对。
-    assert _due_label(-2) == "逾期 2 天", _due_label(-2)
+    # 2026-10-13：逾期那条改叫「制作逾期」—— 已交付项目报的是「结款逾期」，
+    # 两个"逾期"并排时得一眼看出催的是活儿还是钱。
+    assert _due_label(-2) == "制作逾期 2 天", _due_label(-2)
     assert _due_label(0) == "今天到期", _due_label(0)
     assert _due_label(1) == "1 天后到期", _due_label(1)
     assert _due_label(30) == "30 天后到期", _due_label(30)
@@ -404,17 +454,42 @@ def main() -> int:
     board.set_status("node", k2, "取消")
     assert prog_kids() == [("通过", 1), ("取消", 0)], prog_kids()
 
-    # ---------- 制作人 ----------
-    board.set_field("project", prog_p, "artist", "老王")
-    board.set_field("node", k1, "artist", "小李")
+    # ---------- 制作人（2026-10-16 起强关联到 vendors） ----------
+    # 直接插两条外包商：vendors 的写接口在 finance 那边（跟 clients 一处），
+    # 数据层测试不绕过去调它，这里只验 Board 侧的读与回填口径。
+    v_wang = db.run("INSERT INTO vendors(name,kind) VALUES(?,?)", ("老王", "个人"))
+    v_li = db.run("INSERT INTO vendors(name,kind) VALUES(?,?)", ("小李", "团队"))
+    board.set_field("project", prog_p, "artist_id", v_wang)
+    board.set_field("node", k1, "artist_id", v_li)
     d_art = [pp for pp in board.load()["groups"][0]["projects"] if pp["id"] == prog_p][0]
-    assert d_art["artist"] == "老王", d_art
+    assert d_art["artist"] == "老王", d_art          # 对外仍然发名字
+    assert d_art["artist_id"] == v_wang, d_art       # 同时发 id（未分配判据用它）
     assert [c["artist"] for c in d_art["children"]] == ["小李", ""], d_art["children"]
+    assert [c["artist_id"] for c in d_art["children"]] == [v_li, None], d_art["children"]
+    # 清空 = 未分配（None 直接落到 NULL 上）
+    board.set_field("project", prog_p, "artist_id", None)
+    d_art = [pp for pp in board.load()["groups"][0]["projects"] if pp["id"] == prog_p][0]
+    assert d_art["artist"] == "" and d_art["artist_id"] is None, d_art
+    board.set_field("project", prog_p, "artist_id", v_wang)   # 还原，后面还要用
+    # 裸文本列已不可写（白名单撤掉了它）—— 写它就是"绕过 vendors 直接塞名字"
+    try:
+        board.set_field("project", prog_p, "artist", "老王")
+        raise AssertionError("裸文本 artist 不该还能写")
+    except ValueError:
+        pass
     try:
         board.set_field("project", prog_p, "artistx", "x")
         raise AssertionError("不认识字段不该被放行")
     except ValueError:
         pass
+    # 批量改制作人：参数语义已改成 id（传 0 → 清空成未分配）
+    k3 = board.add_node(prog_p, None, "C")
+    r_bulk = board.bulk_update([k3], artist=v_li)
+    assert r_bulk["ok"] and r_bulk["done"] == 1, r_bulk
+    assert db.one("SELECT artist_id FROM nodes WHERE id=?", k3)["artist_id"] == v_li
+    board.bulk_update([k3], artist=0)
+    assert db.one("SELECT artist_id FROM nodes WHERE id=?", k3)["artist_id"] is None
+    board.delete("node", k3)
 
     # ---------- 默认折叠：新建就是折着的 ----------
     assert db.one("SELECT collapsed FROM projects WHERE id=?", prog_p)["collapsed"] == 1
@@ -433,7 +508,7 @@ def main() -> int:
     assert db.one("SELECT collapsed FROM projects WHERE id=?", prog_p)["collapsed"] == 0, \
         "用户点开的状态必须留住"
 
-    # ---------- 老库补列：artist 是后加的，开库要 ALTER 上去 ----------
+    # ---------- 老库补列：artist / artist_id / settle_date / vendor_id 都是后加的 ----------
     import sqlite3
     from pathlib import Path as _P
     legacy = str(_P(path).with_name("legacy.sqlite"))
@@ -452,8 +527,17 @@ def main() -> int:
     con.close()
     db_l = Db(legacy)
     db_l.open()
-    assert "artist" in {r["name"] for r in db_l.q("PRAGMA table_info(projects)")}
-    assert "artist" in {r["name"] for r in db_l.q("PRAGMA table_info(nodes)")}
+    l_p = {r["name"] for r in db_l.q("PRAGMA table_info(projects)")}
+    l_n = {r["name"] for r in db_l.q("PRAGMA table_info(nodes)")}
+    assert "artist" in l_p and "artist" in l_n
+    # 2026-10-16 制作人强关联：裸文本列旁边还得补出 artist_id（值是空的）
+    assert "artist_id" in l_p and "artist_id" in l_n
+    assert "settle_date" in l_p
+    assert "vendor_id" in {r["name"] for r in db_l.q("PRAGMA table_info(finance)")}
+    assert db_l.one("SELECT name FROM sqlite_master WHERE type='table' AND name='vendors'"), \
+        "老库也要建出 vendors 表"
+    # 老库里没有任何制作人文本 → 迁移不该凭空造条目
+    assert db_l.one("SELECT COUNT(*) AS n FROM vendors")["n"] == 0
     assert db_l.one("SELECT collapsed FROM projects")["collapsed"] == 1, "老库也该被折起来"
     db_l.close()
 
@@ -565,6 +649,93 @@ def main() -> int:
     assert Board(db).stats()["stale"] == 0, "阈值拉到 3000 天就不该有停滞"
     assert not Board(db).alerts()["stale"], "alerts 也得跟着变"
     db.set_setting("stale_days", "3")
+
+    # ---------- 筹备不算停滞 / 已交付报结款逾期（2026-10-13 用户定的） ----------
+    from models import STALE_SKIP, settle_gap, _settle_label
+    assert set(STALE_SKIP) == {"筹备", "已交付", "已结款", "归档"}, STALE_SKIP
+
+    # 筹备：活动时间拨到 2020 年也**不算**停滞 —— 而且底栏那个数和告警名单必须一致
+    db.run("UPDATE projects SET status='筹备', last_activity_at=? WHERE id=?",
+           ("2020-01-01 09:00:00", fallback))
+    assert Board(db).stats()["stale"] == 0, "筹备不算停滞（还没开工，谈不上停滞）"
+    assert not [x for x in Board(db).alerts()["stale"] if x["project_id"] == fallback], \
+        "筹备也不能出现在告警名单里（三处口径必须是一个数）"
+
+    # 结款逾期**只认用户填的结款日期**（settle_date，2026-10-13 用户定的）：
+    # 上一版拿交付日期反推，结果老项目会凭空冒出一个跟合同无关的"逾期"。
+    # 结款当天不算（0 天）—— 当天就催太吵，从第 1 天起算。
+    assert settle_gap(dt.date.today().isoformat()) is None, "结款当天不报"
+    assert settle_gap((dt.date.today() - dt.timedelta(days=1)).isoformat()) == 1
+    assert settle_gap("") is None, "没填结款日期就报不出来，别瞎算"
+    assert settle_gap(None) is None
+    assert settle_gap("坏日期") is None
+    assert _settle_label(12) == "结款逾期 12 天"
+
+    # 已交付 + 没填结款日期 → 什么都不报：不算停滞、不算结款逾期，也不算制作逾期
+    # （deadline 早炸了也不报 —— 制作这条线已经结束了）
+    db.run("UPDATE projects SET status='已交付', last_activity_at=?, deadline='2020-01-05'"
+           " WHERE id=?", ("2020-01-01 09:00:00", fallback))
+    assert not db.one("SELECT settle_date FROM projects WHERE id=?", fallback)["settle_date"]
+    assert Board(db).stats()["stale"] == 0, "已交付不算停滞"
+    assert not [x for x in Board(db).alerts()["due"] if x["id"] == fallback], \
+        "没填结款日期就不该有这条告警（不许拿交付日期 / 截止日期凑）"
+
+    # 填上结款日期 → 走结款逾期那条线，并进底栏那个数
+    board.set_field("project", fallback, "settle_date", "2020-01-05")
+    due = [x for x in Board(db).alerts()["due"]
+           if x.get("owner") == "project" and x["id"] == fallback]
+    assert due and due[0]["settle"] is True, due
+    want = (dt.date.today() - dt.date(2020, 1, 5)).days
+    assert due[0]["detail"] == "结款逾期 %d 天" % want, due[0]
+    assert Board(db).stats()["due"] >= 1, "结款逾期要进底栏那个数，否则行上报红、底栏是 0"
+    # 已交付就算 deadline 早就过期，也只报结款逾期、不报制作逾期
+    assert not [x for x in Board(db).alerts()["due"]
+                if x.get("settle") is False and x.get("id") == fallback], due
+    # load() 必须把 settle_date 发到前端 —— 少发一眼就是"行上那颗红字永远是空的"
+    pj = [p for g in Board(db).load()["groups"]
+          for p in g["projects"] if p["id"] == fallback]
+    assert pj and pj[0]["settle_date"] == "2020-01-05", pj
+    # 结款日还没到 / 后来清空 → 都不报，而且是立刻不报
+    board.set_field("project", fallback, "settle_date", "2099-01-01")
+    assert not [x for x in Board(db).alerts()["due"] if x["id"] == fallback]
+    board.set_field("project", fallback, "settle_date", "")
+    assert not [x for x in Board(db).alerts()["due"] if x["id"] == fallback]
+
+    # 上一版那个 delivered_at 已经彻底不认了：白名单撤掉之后连写都写不进去
+    # （留着能写就成了暗门 —— 冒烟造数据时写错字段会静默"成功"）
+    try:
+        board.set_field("project", fallback, "delivered_at", "2026-01-01")
+        raise AssertionError("delivered_at 不该再受理（结款逾期不再看它）")
+    except ValueError:
+        pass
+
+    # set_status：进「已交付」不再顺手打交付日期（2026-10-13 撤掉那个自动时间戳）。
+    # 状态本身照旧要落库，重复切同一个状态也不能出错。
+    p2 = board.add_project("交付状态测试项目", "")
+    board.set_status("project", p2, "已交付")
+    assert db.one("SELECT status FROM projects WHERE id=?", p2)["status"] == "已交付"
+    assert not db.one("SELECT settle_date FROM projects WHERE id=?", p2)["settle_date"], \
+        "切状态不许凭空生出一个结款日期（那是用户跟客户约的，不是系统猜的）"
+    board.set_status("project", p2, "已交付")
+    board.delete("project", p2)
+
+    # 老库迁移：开库时把 settle_date 列补上，但**不许**给老项目凭空填一个结款日
+    # （上一版那个 delivered_at 兜底就是这么把"逾期"造出来的）。
+    # ⚠ 这是唯一会碰用户真实数据的一段，冒烟里造不出来，必须单独钉住。
+    p3 = board.add_project("老库已交付项目", "")
+    db.run("UPDATE projects SET status='已交付', last_activity_at=?"
+           " WHERE id=?", ("2026-08-01 10:20:30", p3))
+    db.conn.execute("ALTER TABLE projects DROP COLUMN settle_date")   # 伪装成老库
+    assert "settle_date" not in {r["name"] for r in db.conn.execute("PRAGMA table_info(projects)")}
+    db._migrate_columns()                                            # 再开一次库时跑的那步
+    assert "settle_date" in {r["name"] for r in db.conn.execute("PRAGMA table_info(projects)")}, \
+        "老库缺的列要补上，否则一查就报 no such column"
+    assert not db.one("SELECT settle_date FROM projects WHERE id=?", p3)["settle_date"]
+    assert not [x for x in Board(db).alerts()["due"] if x["id"] == p3], \
+        "老库的已交付项目不许被补一个结款日，也就不该有告警（宁可静默）"
+    db._migrate_columns()                                            # 幂等：跑第二遍不变样
+    assert not db.one("SELECT settle_date FROM projects WHERE id=?", p3)["settle_date"]
+    board.delete("project", p3)
 
     db.backup()
     db.close()

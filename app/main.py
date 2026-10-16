@@ -580,13 +580,16 @@ def main() -> int:
         # 典型是路径检查撞上**已断链的网络盘符**（Windows 重连实测能等 21 秒）——
         # 就会假报"页面没回传状态"，看着像被测功能坏了。上限放宽到 120 秒：
         # 正常情况下 2 秒内就拿到报告，只有真出问题才会耗到上限。
-        for _ in range(120):
+        # ⚠ 2026-10-13 再放宽到 240 秒：用例又长了（settle / prjset 两段真点真写库），
+        # 本机实测全程已到 110~130 秒 —— 又贴着上限了，症状是"没写出 smoke_note.txt"，
+        # 特别像被测功能坏了。这个上限只影响 --smoke 这条自检路径。
+        for _ in range(240):
             time.sleep(1)
             rep = str(state.get("boot_report") or "")
             if rep:
                 break
         if not rep:
-            rep = ("NO_REPORT: 页面 120 秒内没有回传状态；"
+            rep = ("NO_REPORT: 页面 240 秒内没有回传状态；"
                    f"bridge_ok={bool(state.get('bridge_ok'))}；"
                    f"stages={state.get('diag_stages')}")
 

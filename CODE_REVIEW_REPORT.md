@@ -1,79 +1,83 @@
 # 代码审查报告（天在看 / Task-Overview）
 
-> 本轮审查日期：2026-10-06 · 审查对象：全部源码（app / tools / tests / 前端）
+> 最新一轮审查：2026-10-16 · 审查对象：9 天新增代码（b704e66 → b6521cf，14 个 commit，约 1 万行增量）
 > 审查人视角：代码审查专家（正确性 > 安全性 > 可维护性 > 性能，不以风格偏好判分）
+> 历史：2026-10-06 完成首轮全量审查（3 处 nit 已修复，见文末）
 
 ## 一、结论（TL;DR）
 
-**这是一个已经高度打磨、维护纪律极好的工程。** 本轮从头到尾通读了
-45 个 Python 文件 + 约 6300 行前端（app.js / diag.js / boot.html / index.html / style.css），
-共 11,000+ 行代码。对照 `CODE_REVIEW.md` 既定的分层清单逐条核验后：
+本轮审查覆盖 9 天里新增的结款核销、外包商名录、序列模板、批量删除、结款日期、
+版式修复等 14 个 commit。**核心新功能实现扎实**：核销（writeoff）口径清晰、事务处理
+严谨、幂等设计到位；外包商强关联的迁移不丢数据。发现的问题全部是 nit 级死代码，
+无阻塞、无建议级问题：
 
 - 🔴 **阻塞级问题：0 个**
-- 🟡 **建议级问题：0 个**（发现的全是 💭 nit 级死代码 / 冗余 import）
-- 💭 **nit 级问题：3 处**（已全部修复）
+- 🟡 **建议级问题：0 个**
+- 💭 **nit 级问题：3 处**（已全部修复，其中 1 处含不可达代码 + 未定义变量的隐患）
 
-这组数字本身说明问题：项目在「先实测再下结论」「单一来源」「改动可验证」
-三条铁律上执行得极扎实，绝大多数注释写的是"为什么"和"坑"而不是"是什么"。
+## 二、发现与修复（本轮）
 
-## 二、审查范围与方法
+### 🔴→💭 nit-1：`models.bulk_delete` 末尾重复 return（已修复）
 
-| 层 | 文件 | 规模 | 关注点 |
-| --- | --- | --- | --- |
-| 数据层 | `app/db.py` | 792 行 | 连接 / 锁 / 迁移 / 便捷方法 |
-| 业务层 | `models.py` `finance.py` `node_spec.py` | 1915 行 | 口径一致性 / 事务 / 空值防御 |
-| API 层 | `api.py` | 637 行 | 异常回传 / 参数校验 / 桥序列化 |
-| 路径/入口 | `paths.py` `version.py` `opener.py` `_boot.py` | 690 行 | 判据单一来源 / sys.frozen |
-| 主层 | `main.py` `boot.py` `remind.py` | 975 行 | 生命周期 / ctypes 声明 / 通知身份 |
-| 前端 | `app/web/*` | 6359 行 | DOM 定位 / 死代码 / 口径对齐 |
-| 工具层 | `tools/*.py` | 1725 行 | 构建 / 打包 / 图标 / 同步 |
-| 测试层 | `tests/*.py` | 1753 行 | 断言有效性 |
+- **落点**：`app/models.py:749-750`
+- **问题**：`bulk_delete` 方法末尾有**两行连续 return**。第二行是不可达死代码，
+  且引用了本方法里不存在的变量 `keep`（那是 `reset_priority` 的参数）——若第一行
+  return 被改动，第二行一旦执行会抛 `NameError`。这是复制粘贴遗留。
+- **处理**：删除第二行死代码，保留正确的 `{"ok": True, "done", "skipped", "msg"}`。
 
-方法：静态审计（`_audit_dead.py` AST + JS 引用计数）→ 逐层通读 + 定位落点 →
-针对性 grep 交叉验证调用图 → 8 个数据层回归 + GUI/exe 冒烟基线核验。
+### 💭 nit-2：前端 `catName` / `groupOf` 一对死函数（已删除）
 
-## 三、发现与修复
+- **落点**：`app/web/app.js:1380-1384`
+- **证据**：`catName` 全工程零调用；`groupOf` 只被 `catName` 调用。二者是「通过
+  key 反查分组名」的历史遗留，分组名显示早已改为遍历 `D.groups` 直接取 `g.name`
+  （见 `app.js:938/946` 等）。
+- **处理**：删除两个函数，精简对应注释。
 
-### 💭 nit-1：`api.finance_export` 是死方法（已删除）
+### 💭 nit-3：`index.html` 三个死 id（已删除）
 
-- **落点**：`app/api.py:373`
-- **证据**：前端 `app.js` 无任何 `finance_export` 调用——导出早已重构为两步
-  `finance_export_plan`（只算文件名/笔数做预览，不弹窗）+ `finance_export_save`
-  （弹系统另存为落地）。`_audit_dead.py` 报它「引用数 0」，交叉 grep 确认仅
-  `DESIGN.md` 文档里残留一句提及。
-- **处理**：删除方法；`DESIGN.md` 的方法清单同步改为 `_plan / _save` 两步描述。
+- **落点**：`app/web/index.html` 的 `#psDlPh` / `#psSettlePh` / `#dateInputPh`
+- **证据**：日期占位符 `.dph` 靠 CSS 相邻选择器（`input ~ .dph`）和 `.dph` 类控制，
+  JS 通过类/容器选择器操作，这三个 id 无任何引用。
+- **处理**：删除三个 id，`.dph` 类和结构不动。
 
-### 💭 nit-2：`tools/_desens.py` 未使用的 `import re`（已删除）
+> 修复后 `_audit_dead.py` 重跑：死方法 0 / 未使用 import 0 / JS·HTML·CSS 死代码 0。
+> 9 个数据层回归全绿（db / finance / project_money / m4 / node_spec /
+> activity_weight / bulk / export / payoff）。
 
-- **证据**：全文件无 `re.` 调用（脱敏脚本走的是字节层 `bytes.replace`）。
+## 三、值得肯定的实现（本轮抽查）
 
-### 💭 nit-3：`tests/_diag/_xcheck_ignored.py` 未使用的 `import sys`（已删除）
+- **核销（writeoff）口径严谨**（`finance.py`）：`待收 = 合同额 − 已收 − 已核销`，
+  结款只动它自己那条 `结款核销` 记录，用户手记的核销不碰、合同额一条不改——
+  收款率因此保持诚实（15 万收 12 万 = 80%，不是抹掉损失后的 100%）。幂等
+  （差额 < 0.01 不写库）、一笔已收都没有时拒绝，都考虑到了。
+- **外包商迁移不丢数据**（`db._migrate_vendors`）：老库裸文本 `artist` 按 casefold
+  去重后一次性建成 vendors 条目并回填 `artist_id`，幂等、快照回滚也能重跑；
+  文本列故意不删（SQLite 删列要重建表）。
+- **`settle_gap` 结款逾期判据单一实现**，前端 `settleDays` 逐字对齐，冒烟钉着
+  底栏/告警/行上红字三处口径一致——延续了项目「口径唯一出口」的一贯做法。
+- **`bulk_delete` 显式 `BEGIN` + 级联去重**：多选常常祖先与后代同时在选，方法先把
+  整棵子树展开去重再一条 DELETE，`done` 报真实消失条数，界面对得上。
+- **注释质量**：几乎每条"为什么"都附踩坑日期和复现结论（如 `2026-10-10` autocommit
+  下漏 BEGIN 留半拉子、`2026-10-13` 交付日期反推逾期不合理），可维护性极强。
 
-- **证据**：全文件无 `sys.` 调用（用 `subprocess` 完成全部工作）。
+## 四、历史审查记录
 
-> 修复后 `_audit_dead.py` 重跑：死方法 0 条 / 未使用 import 0 条 / JS·HTML·CSS 死代码 0 条。
+### 2026-10-06（首轮全量审查）
 
-## 四、值得肯定的实现（抽查亮点）
+通读 45 个 Python 文件 + 6300 行前端（11,000+ 行），结论：阻塞 0 / 建议 0 / nit 3。
+修复：① 删除死方法 `api.finance_export`（导出已重构为 `_plan` + `_save` 两步）；
+② 删除 `tools/_desens.py` 未使用的 `import re`；③ 删除 `tests/_diag/_xcheck_ignored.py`
+未使用的 `import sys`。
 
-- **ctypes 句柄全部显式 `argtypes`/`restype` 且按指针宽度声明**（`db.py` 互斥量、
-  `main.py` SetWindowPos/FindWindowW）—— 64 位 HWND 截断这个坑被系统性防住。
-- **停滞 / 活跃度 / 到期文案三处口径各只有一个实现出口**，前端只能逐字对齐，
-  且冒烟里钉着三处一致（`models.stale_gap` / `NODE_ACTIVE_STATUS` / `_due_label`）。
-- **NAS 文件操作全项目贯彻「复制+删原，绝不 rename」**，毒化问题有专门模块
-  `nasfs.py` 收口，且 `build_exe.py` 在构建前做了与让位失败同判据的 `[0/4]` 占用预检。
-- **前端选择集判存统一 `Number(id)` 收口**、项目/环节 id 撞车用「对象当键」规避、
-  多选派生显示态与批量范围严格分离——这类隐形 bug 都被注释点破了根因。
-- **注释质量**：几乎每条"为什么"都附了踩坑日期和复现结论（如 `2026-09-27` 复选框
-  preventDefault 回滚、`2026-10-04` 制作人反选漏判），可维护性极强。
+### 2026-10-07（敏感信息专项）
 
-## 五、后续建议（非阻塞）
+发现 `GITHUB_PUSH_STEPS.md` 含真实 SSH 公钥且已推上公开仓库，处置：作废旧 key +
+重生新 key + 该手册移出 git 跟踪并从发布清单排除。详见工作日志 `2026-10-07.md`。
 
-1. **`models.py:10` 的 `today` 导入**：`from db import GROUPS_DEFAULT, now, today`
-   里 `today` 仅在第 908 行 `checked_in_today()` 用到一次，`now` 大量使用——两者都真用了，
-   不构成死代码；但 `today` 与 `date.today()` 语义易混，可在用到处改
-   `today()`（已一致，无风险）。
-2. **`paths.py:94 default_db_path` 与 `db.py:26 default_db_path` 重名**：这是
-   刻意设计（`paths` 延迟导入 `db` 避免循环引用，`paths.default_db_path()` 只是
-   转发器），注释已写明，**不要合并**。
-3. **`collapse_all` / `set_collapsed_all`**：顶栏按钮已按用户要求撤掉，但方法仍被
-   `diag.js` 自检和 `smoke_m4.py` 程序化调用——是活的，**不要当死代码删**。
+## 五、后续建议（非阻塞，长期有效）
+
+1. **`paths.default_db_path` 与 `db.default_db_path` 重名**：刻意设计（延迟导入转发，
+   避免循环引用），注释已写明，**不要合并**。
+2. **`collapse_all` / `set_collapsed_all`**：顶栏按钮已撤，但方法仍被 `diag.js` 自检
+   和 `smoke_m4.py` 程序化调用——是活的，**不要当死代码删**。
+3. **`delivered_at` 列故意保留**：SQLite 删列要重建整表，代码已不读写，只剩注释。

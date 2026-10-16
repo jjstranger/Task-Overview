@@ -33,14 +33,14 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "app"))
 
-from smoke_fin_gui import seed  # noqa: E402  同一个 seed，别再造一份数据
+from smoke_fin_gui import num, seed  # noqa: E402  同一个 seed，别再造一份数据
 from version import (  # noqa: E402
     AUMID, EXE_STEM, TITLE, VERSION, VERSION_LINE)
 
@@ -158,6 +158,12 @@ def main() -> int:
             say("--- 自检在 %s 阶段超时，这是本机环境抖动，自动重跑一次 ---"
                 % (probe.get("failed") or "?"))
             clear_note()
+            # ⚠ 重跑前**必须重新 seed**：第一轮的自检已经把 tmp 库改过一遍了
+            #（行被展开、9 个环节的截止日期被批量改成 2027-12-31、还多建了节点）。
+            # 拿它当第二轮的初始态，一批「树里几行 / 第几行是什么」的断言会整片
+            # 假红 —— 2026-10-13 实测踩到，9 条 FAIL 全是这个原因、功能其实是好的。
+            # 这个库是 seed 出来的测试数据，重灌一次不会丢任何真实东西。
+            seed(db_path, nosandbox=(mode == "persist"))
             code, took, child = run_once()
             say("exit=%s  用时 %.1fs（重跑）" % (code, took))
             if child.strip():
@@ -210,6 +216,16 @@ def main() -> int:
         fin_.get("cards") == 6 and fin_.get("cardRows") == [3, 3]
         and fin_.get("aging") == 4)
     chk("财务默认看本年份", fin_.get("yearVal") == str(date.today().year))
+    # 四组数据是标签页（2026-10-16，用户要求省空间）：打包后前端必须是同一份
+    chk("财务四组数据是标签页、默认停在「项目款项」（%s / %s）"
+        % (fin_.get("finTabBtns"), fin_.get("finTabAct")),
+        fin_.get("finTabBtns") == ["项目款项", "客户汇总", "外包商汇总", "应收账龄"]
+        and fin_.get("finTabAct") == "prj"
+        and fin_.get("paneVis") == [True, False, False, False])
+    chk("切到「应收账龄」真换表、能切回来（%s / %s / %s）"
+        % (fin_.get("ageAct"), fin_.get("ageVis"), fin_.get("backVis")),
+        fin_.get("ageAct") == "age" and fin_.get("ageVis") == [False, False, False, True]
+        and fin_.get("backVis") is True)
     # 项目页筛选：这是本轮新加的前端 + 后端（load 带 include_archived），打包后必须还在
     chk("项目页有「筛选 ▾」按钮", (tree.get("filterText") or "").strip() == "筛选 ▾")
     chk("筛选菜单首项是「隐藏归档项目」且默认勾上",
@@ -253,11 +269,89 @@ def main() -> int:
         fin_.get("yearTag") == "SELECT" and fin_.get("ccySeg") == 0)
     chk("导出下拉菜单（导出… / 打开导出目录）",
         [x for x in (fin_.get("exportMenu") or []) if x] == ["导出…", "打开导出目录"])
+    # 税后提示 + 结款（2026-10-13）：打包后前端也得是同一份，走完整点击路径。
+    # 税后 = 金额 ÷ (1+税率%) → 100000 / 1.06 = 94339.62
+    po = rep.get("payoff") or {}
+    chk("税后提示算得对（100000+6%% → 94,339.62，实得 %r）" % po.get("netText"),
+        po.get("netText") == "（税后 94,339.62 元）"
+        and po.get("netEmptyNoTax") is True
+        and po.get("netEmptyBadAmount") is True)
+    chk("建项目弹窗的税后提示也在（实得 %r）" % po.get("newNetText"),
+        po.get("newNetText") == "（税后 94,339.62 元）")
+    # 版式（2026-10-13）：金额 + 税率% + 税后提示必须**一行画完**。
+    # 判据是整行所有文字的最大行数 —— 那次真正折的是一旁的「税率%」，
+    # 只盯税后提示看不见。打包后样式也走同一份，所以这里一并钉住。
+    chk("金额行一行画完（常规 %s / 七位数 %s / 带滚动条 %s 行，行高 %s，滚动条吃 %s px）"
+        % (po.get("finRowLines"), po.get("finRowLinesBig"),
+           po.get("finRowLinesScroll"), po.get("finRowHScroll"), po.get("finScrollCost")),
+        po.get("finRowLines") == 1 and po.get("finRowLinesBig") == 1
+        and po.get("finRowLinesScroll") == 1)
+    chk("新建项目页的合同额行也一行画完（%s / %s）"
+        % (po.get("newRowLines"), po.get("newRowLinesBig")),
+        po.get("newRowLines") == 1 and po.get("newRowLinesBig") == 1)
+    chk("结款按钮只在「到账」类型露头（%s / %s）、核销那颗类型按钮也在（%s）"
+        % (po.get("btnHiddenWhenContract"), po.get("visWhenPayment"),
+           po.get("kinds")),
+        po.get("btnText") == "结款（核销待收）"
+        and po.get("visWhenPayment") is True
+        and po.get("btnHiddenWhenContract") is True
+        and po.get("btnHiddenWhenInvoice") is True
+        and "writeoff" in (po.get("kinds") or []))
+    chk("结款确认弹层列出 2 条到账、把账摊开写（实得 %s 行 / %r）"
+        % (po.get("listRows"), po.get("head")),
+        po.get("confirmOpen") is True and po.get("listRows") == 2
+        and "待收" in (po.get("head") or "")
+        and "70,000.00" in (po.get("head") or ""))
+    # 样本是「已收 30000 + 待收 5000」，只有 30000 进「已收」（待收不算）。
+    # 2026-10-16 改口径：结款**不动合同额**，而是凭空多出一条核销 = 70000。
+    chk("结款落库：合同额仍是 100000、多出一条核销 70000、待收归零（实得 %s / %s / %s）"
+        % (po.get("contractAfter"), po.get("writeoffAfter"), po.get("pendingAfter")),
+        po.get("contractAfter") == 100000 and po.get("contractRecs") == 1
+        and po.get("writeoffAfter") == 70000
+        and (po.get("woRecs") or []) == [[70000, "已核销", "结款核销"]]
+        and po.get("recCount") == 4 and po.get("settled") is True
+        and po.get("pendingAfter") == 0
+        and po.get("confirmClosed") is True and po.get("gone") is True
+        and po.get("errNew") is None)
+    # 逾期文案三条（2026-10-13）：筹备不算停滞 / 已交付报结款逾期 / 其余报制作逾期。
+    # 结款逾期的起算日是**用户手填的结款日期**（没填就不报）—— 第二轮改的口径。
+    # 打包后 diag.js 跟源码里是同一份，这里钉的是"这条渲染路径没被漏在包外面"。
+    sv = rep.get("settle") or {}
+    chk("制作逾期文案（过期 5 天 →「制作逾期 5 天」，实得 %r）" % sv.get("dueA"),
+        sv.get("dueA") == "制作逾期 5 天")
+    chk("没填结款日期时行上不报结款逾期（实得 %r）" % sv.get("noSettleDate"),
+        sv.get("noSettleDate") == "")
+    chk("填了结款日期才报结款逾期（12 天 →「结款逾期 12 天」，实得 %r）" % sv.get("dueC"),
+        sv.get("dueC") == "结款逾期 12 天"
+        and sv.get("settleDate") == (date.today() - timedelta(days=12)).isoformat())
+    chk("筹备 / 已交付不报停滞、底栏不少算结款逾期（%s / %s / due=%s）"
+        % (sv.get("staleB"), sv.get("staleC"), sv.get("statsDue")),
+        sv.get("staleB") is False and sv.get("staleC") is False
+        and (sv.get("statsDue") or 0) >= 2
+        and sv.get("inStaleList") is False)
+    chk("告警面板分得清结款与制作（结款 %s / 制作 %s）"
+        % (sv.get("alertsSettle"), sv.get("alertsNormal")),
+        sv.get("alertsSettle") is True and sv.get("alertsNormal") is True
+        and sv.get("gone") is True and sv.get("errNew") is None)
+    # 项目设置页（2026-10-13 新增）：⋯ 里的旧入口撤了、新页能改能存。
+    # ⚠ 这一段在打包态尤其要紧：app.js / index.html 是新加的 DOM 和绑定，
+    #   只要有一个文件没进包，整页就是死的（跟着文件走的断言才逮得住）。
+    pv = rep.get("prjset") or {}
+    chk("项目行 ⋯ 里有「项目设置…」、旧的三条入口已撤（%s）" % (pv.get("menu"),),
+        pv.get("hasSet") is True and pv.get("oldGone") is True)
+    chk("项目设置页能开、能改、能存（标题 %r / 分类 %r / 结款日 %r / 目录 %r）"
+        % (pv.get("title"), pv.get("cat"), pv.get("settle"), pv.get("path")),
+        pv.get("dlgOpen") is True and pv.get("dlgClosed") is True
+        and pv.get("title") == "设置页冒烟P改" and pv.get("cat") == pv.get("wantCat")
+        and pv.get("settle") == (date.today() - timedelta(days=7)).isoformat()
+        and pv.get("path") == "/冒烟/设置页目录" and pv.get("links") == 1)
+    chk("设置页样本全程无未捕获报错、自己清干净（%r）" % pv.get("errNew"),
+        pv.get("gone") is True and pv.get("errNew") is None and pv.get("ok") is True)
     # 导出选项弹窗（范围 / 项目 / 内容 / 文件名预览）—— 打包后前端也得是同一份。
     # ⚠ 只看界面：#exOk 会弹模态系统对话框，冒烟里不能点（smoke_fin_gui.py 有同样的注释）
-    chk("导出选项弹窗能打开、默认 Excel + 四项内容全勾",
+    chk("导出选项弹窗能打开、默认 Excel + 五项内容全勾（多了外包商汇总）",
         ex_.get("dlg") is True and ex_.get("fmtAct") == "xlsx"
-        and ex_.get("secsOn") == ["records", "projects", "clients", "aging"])
+        and ex_.get("secsOn") == ["records", "projects", "clients", "vendors", "aging"])
     chk("导出预览文件名是 board_finance_*.xlsx (%s)" % ex_.get("planName"),
         str(ex_.get("planName") or "").startswith("board_finance")
         and str(ex_.get("planName") or "").endswith(".xlsx"))
@@ -265,9 +359,59 @@ def main() -> int:
         ex_.get("prjShown") is True and (ex_.get("prjN") or 0) >= 1
         and ex_.get("datesShown") is True)
     chk("导出弹窗：CSV 锁成只导款项明细",
-        ex_.get("csvOn") == ["records"] and ex_.get("csvOff") == 4)
+        ex_.get("csvOn") == ["records"] and ex_.get("csvOff") == 5)
     chk("制作人字段打进包了（行里显示 + 菜单可改）",
         rep.get("artist", {}).get("tags") == 1)
+    # 外包商 / 制作人名录（2026-10-16 打通）—— 打包后**最该盯**的是
+    # `_migrate_vendors` 和 JOIN：它俩一个跑在启动路径上、一个是 SQL，
+    # 源码模式绿不代表打包后绿（资源/路径类问题只有真跑 exe 才暴露）。
+    fv = rep.get("fin") or {}
+    chk("外包商汇总打进包了（有数据行 %s / 表头 %s）"
+        % (fv.get("vendorRows"), fv.get("vendorHead")),
+        (fv.get("vendorRows") or 0) >= 1
+        and fv.get("vendorHead") == ["外包商", "类型", "项目数", "已付", "应付", "合计",
+                                    "笔数", "最近一笔"])
+    chk("款项明细里带着外包商名字（打包后 JOIN 仍然通，%s）"
+        % (fv.get("outsourceVendor"),),
+        (fv.get("outsourceVendor") or []) == ["冒烟工作室", "冒烟工作室"])
+    # 下面这块跟 smoke_fin_gui.py 同一套断言，**改一侧必须两处一起改**
+    vv = rep.get("vendor") or {}
+    chk("外包商面板：列表 / ⋯ 菜单（编辑 + 删除）/ 菜单画在弹窗之上",
+        vv.get("opened") is True and (vv.get("rows") or 0) == (vv.get("ops") or -1)
+        and (vv.get("ops") or 0) > 0
+        and vv.get("hasEdit") is True and vv.get("hasDel") is True
+        and (vv.get("popZ") or 0) > 200 and vv.get("delRed") is True)
+    chk("外包商：编辑回填四栏、两档能切、清空表单回新建态",
+        vv.get("nameFilled") == "冒烟待删外包商"
+        and vv.get("saveTxt") == "更新外包商" and vv.get("kindFilled") == "团队"
+        and vv.get("contactW") == "wx:smoke" and vv.get("noteW") == "外协样本"
+        and vv.get("kindSwitch") == "个人" and vv.get("resetCleared") is True)
+    chk("外包商改名**不断关联**（同一 id、项目上名字跟着改，%r / %r）"
+        % (vv.get("renameTreeName"), vv.get("renameRowTxt")),
+        vv.get("renamed") is True and vv.get("renameSameId") is True
+        and vv.get("renameKeptLink") is True
+        and (vv.get("renameTreeName") or "").strip() == "冒烟小工V2"
+        and "冒烟小工V2" in (vv.get("renameRowTxt") or ""))
+    chk("外包商：有款项挂着的删不掉、没人挂靠的删得掉",
+        vv.get("busyBlocked") is True and vv.get("busyStill") is True
+        and vv.get("deleted") is True and vv.get("delAlert") is None)
+    chk("「记一笔」外包商行只跟「外包支出」在一起 + 空着不给存",
+        vv.get("vdrRowOnPayment") is False and vv.get("vdrRowOnOutsource") is True
+        and vv.get("vdrRowOnInvoice") is False and vv.get("vdrRowBack") is True
+        and "外包商" in (vv.get("emptyToast") or "")
+        and vv.get("emptyKept") is True and vv.get("emptyNoRec") is True)
+    chk("「记一笔」填新名字 → 现建条目 + 汇总口径对得上（%s/%s/%s）"
+        % (vv.get("sumPaid"), vv.get("sumPending"), vv.get("seedPending")),
+        vv.get("newMade") is True and vv.get("newLinked") is True
+        # ⚠ 不能 `x or -1`：0 是这里的**正确值**（刚记的是「应付」，已付就该是 0）
+        and num(vv.get("sumPaid")) == 0
+        and num(vv.get("sumPending")) == 777
+        and vv.get("sumCount") == 1
+        and num(vv.get("seedPending")) == 5000)
+    chk("外包商样本收拾干净、无未捕获报错（%r）" % vv.get("errNew"),
+        vv.get("cleaned") is True
+        and (vv.get("backTo") or []) == ["冒烟制作人", "冒烟小工", "冒烟工作室"]
+        and vv.get("errNew") is None)
     chk("拖拽 / 快照等 M4 功能可用", m4.get("moved") is True and m4.get("snapOk") is True)
     # 进度条：状态改「通过」就该计入完成（打包后也用同一份前端）
     chk("进度条按状态算（1/1 · 100%）",
@@ -307,6 +451,11 @@ def main() -> int:
         and nd.get("emptySay") == "填写环节名称后，这里将展示。"
         and "使用英文" in _hs and "英文双引号" in _hs
         and "顿号" not in _hs and "名字里本来" not in _hs)
+    # 序列模板是**改在 node_spec.py 里**的：改后端就得重建 exe，这条专治"包里的
+    # node_spec 还是旧的"（只看界面文案的话，hot-swap 过的 web/ 会一路绿灯）
+    chk("序列模板随包发出且真能解析（WD####(12-20) → 9 个）",
+        "WD####(12-20)" in _hs and nd.get("seqPvOk") is True
+        and nd.get("seqPvCount") == 9 and nd.get("seqPrevOk") is True)
     chk("跑的是打包模式 (frozen=True)", tree.get("frozen") is True)
     # 通知身份：显式 AUMID 注册成功（pathinfo 回读的是系统真实值）。
     # 不设的话 Win11 通知显示「天在看.exe」+ fallback 图标（2026-10-01 蓝方块就是它）
@@ -352,9 +501,9 @@ def main() -> int:
     # 用户报的核心 bug：点复选框本身时勾选显示差一拍
     chk("多选批量：点复选框本身当场显示勾",
         (mu.get("pickClick1") or {}).get("ok") is True)
-    # 2026-10-02 语义变更：直接点 = **单选**（第一条让位）；连点同一条 = 取消。
-    #   以前这里写的是"第二条不影响第一条"，恰好把累加 bug 当成了正确行为。
-    chk("多选批量：直接点第二条 = 单选（第一条让位）；再点同一条 = 全取消",
+    # 2026-10-10 用户要求改回「不按任何键 = 加选」（无修饰键与 Ctrl 等价）。
+    #   语义来回翻过两次，别再写反：取反→累加 → 10-02 真单选 → 10-10 加选。
+    chk("多选批量：直接点第二条 = **加选**（第一条还在）；再点同一条 = 只撤它自己",
         (mu.get("pickClick2") or {}).get("ok") is True
         and (mu.get("pickClick3") or {}).get("ok") is True)
     chk("多选批量：Ctrl 点仍然是加选",
@@ -393,7 +542,8 @@ def main() -> int:
     # 「全选本层」按用户要求撤掉了，改由点父级自带级联。
     # 采回批量条上真实存在的按钮来断言：既确认"全选"没被加回来，也能发现少了谁。
     _bl = mu.get("barLayout") or {}
-    chk("多选批量：批量条一行排完，「退出多选」在「清空」右边（实际=%s）" % (_bl,),
+    chk("多选批量：批量条一行排完（计数+提示+%s 颗按钮同一行）"
+        % ((_bl.get("wantKids") or 0) - 2),
         _bl.get("ok") is True)
     chk("多选批量：一条没选时计数整段留白、不写「还没选」",
         _bl.get("cntWhenNone") == "")
@@ -401,11 +551,22 @@ def main() -> int:
     chk("多选批量：树往下滚时批量条粘在内容区顶部、不被行盖住（实际=%s）" % (_bs,),
         _bs.get("ok") is True)
     _bb = mu.get("bulkBtns") or []
-    chk("多选批量：批量条就这六颗按钮、没有「全选本层」（实际=%s）" % (_bb,),
-        len(_bb) == 6
+    chk("多选批量：批量条就这七颗按钮、没有「全选本层」（实际=%s）" % (_bb,),
+        len(_bb) == 7
         and not any("全选" in t for t in _bb)
         and all(any(k in t for t in _bb)
-                for k in ("状态", "制作人", "截止日期", "备注", "清空", "退出")))
+                for k in ("状态", "制作人", "截止日期", "备注", "删除", "清空", "退出")))
+    # 批量删除（2026-10-10）—— 跟 GUI 冒烟同一套判据，exe 里再钉一遍
+    _bd = mu.get("bulkDel") or {}
+    _bdbtn = mu.get("bulkDelBtn") or {}
+    chk("多选批量：有「删除」按钮、带 warn 类（红）、在「清空」左边",
+        _bdbtn.get("found") is True and "warn" in (_bdbtn.get("cls") or "")
+        and _bdbtn.get("delBeforeClear") is True
+        and _bdbtn.get("exitRightmost") is True)
+    chk("多选批量：点「删除」弹确认 → 父与两个子环节都被级联删掉（真点按钮、不调 API）",
+        (_bd.get("asked") or 0) >= 1 and _bd.get("parentGone") is True
+        and _bd.get("kid1Gone") is True and _bd.get("kid2Gone") is True)
+    chk("多选批量：删完选择集清空", (_bd.get("selAfter") or 0) == 0)
     chk("多选批量：改状态真的落库（勾的几条全变了）", mu.get("statOk") is True)
     chk("多选批量：改制作人真的落库", mu.get("artistOk") is True)
     chk("多选批量：退出后复选框消失", mu.get("pickGone") == 0)
@@ -435,6 +596,16 @@ def main() -> int:
         cl.get("made") is True and cl.get("nameFilled") is True
         and cl.get("saveTxt") == "更新客户" and cl.get("delOk") is True
         and cl.get("busyBlocked") is True and cl.get("stillRefused") is True)
+
+    # 日期选择弹窗（2026-10-16）：环节「编辑截止日期」从 prompt 换成日历控件。
+    # 打包后跑的必须还是同一份前端 —— 弹窗真开、保存真落库、清空真清掉。
+    dd2 = rep.get("date") or {}
+    chk("日期弹窗：⋯ 菜单能开、是个 date 框、保存 / 清空都真落库（%s / %s / %r）"
+        % (dd2.get("title"), dd2.get("saved"), dd2.get("afterClear")),
+        dd2.get("menuHas") is True and dd2.get("dlgOpen") is True
+        and dd2.get("inputType") == "date"
+        and dd2.get("saved") == "2027-03-15" and (dd2.get("afterClear") or "") == ""
+        and dd2.get("cleaned") is True)
 
     base = os.path.abspath(tree.get("base") or "")
     data = os.path.abspath(tree.get("data") or "")

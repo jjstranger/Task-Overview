@@ -63,8 +63,10 @@ def main() -> int:
              "date": "2026-01-15", "status": "已收"})
     fin.add({"kind": "payment", "project_id": p2, "amount": 20000,
              "date": "2026-06-30", "status": "已收"})
+    # 外包支出从 2026-10-16 起**必须**选一个外包商（打通后按人汇总），先建一个
+    v1 = fin.vendor_save(None, {"name": "外协老王", "kind": "个人"})
     fin.add({"kind": "outsource", "project_id": p2, "amount": 5000,
-             "date": "2026-06-30", "status": "已付"})
+             "date": "2026-06-30", "status": "已付", "vendor_id": v1})
     # 没填日期的那笔：改老库/导入数据里真实存在，只能直接写库造出来
     # （fin.add 会把空日期补成今天）
     db.run("INSERT INTO finance(project_id,node_id,kind,amount,currency,date,status)"
@@ -72,8 +74,9 @@ def main() -> int:
 
     # ---- 1. norm_opts 默认值 = 老行为 ----
     o = fin.norm_opts(None)
-    chk("默认 opts：xlsx + 四项内容全要 + 不限时间/项目",
-        o["fmt"] == "xlsx" and o["sections"] == ["records", "projects", "clients", "aging"]
+    chk("默认 opts：xlsx + 五项内容全要 + 不限时间/项目",
+        o["fmt"] == "xlsx" and o["sections"] == ["records", "projects", "clients",
+                                                 "vendors", "aging"]
         and o["year"] == 0 and o["date_from"] == "" and o["date_to"] == ""
         and o["project_ids"] == [] and o["client_id"] == 0)
     chk("认不出来的格式退回 xlsx",
@@ -141,6 +144,10 @@ def main() -> int:
         and fin.build_name("csv", fin.norm_opts({"project_ids": [p1, p2]})).endswith(".csv"))
 
     # ---- 5. 内容勾选真的影响产出 ----
+    # ⚠ 核销这笔**故意放在这里才加** —— 前面「过滤真的生效」那段数的是种子笔数，
+    #   提前加进来会让那些数字全飘（5 笔变 6 笔之类），噪音大而价值为零。
+    fin.add({"kind": "writeoff", "project_id": p2, "amount": 1500,
+             "date": "2026-06-30", "status": "已核销", "note": "银行手续费"})
     from openpyxl import load_workbook
 
     def xlsx_sheets(**kw):
@@ -152,13 +159,30 @@ def main() -> int:
         xlsx_sheets(sections=["projects"]) == ["项目汇总"])
     chk("勾明细 + 账龄 → 两张表、顺序跟界面一致",
         xlsx_sheets(sections=["records", "aging"]) == ["款项明细", "应收账龄"])
-    chk("默认（不传 sections）→ 四张表，跟老行为一致",
-        xlsx_sheets() == ["款项明细", "项目汇总", "客户汇总", "应收账龄"])
+    chk("默认（不传 sections）→ 五张表，跟老行为一致（只是多了外包商汇总）",
+        xlsx_sheets() == ["款项明细", "项目汇总", "客户汇总", "外包商汇总", "应收账龄"])
+    # 外包商汇总能单独勾（2026-10-16 新增的一项）
+    chk("只勾外包商汇总 → 只有一张表",
+        xlsx_sheets(sections=["vendors"]) == ["外包商汇总"])
 
     pj = os.path.join(out, "b.xlsx")
+    fin.export_to(pj, "xlsx", {"sections": ["projects"]})
+    ws = load_workbook(pj)["项目汇总"]
+    head_p = [c.value for c in ws[1]]
+    chk("项目汇总多了「已核销」一列（插在「待收」后面）",
+        head_p[7] == "已核销" and head_p[6] == "待收")
+    p2row = [r for r in ws.iter_rows(min_row=2, values_only=True) if r[0] == "项目乙"]
+    chk("项目乙那行的已核销 = 1500", p2row and p2row[0][7] == 1500)
+
     fin.export_to(pj, "xlsx", {"sections": ["projects"], "project_ids": [p2]})
     ws = load_workbook(pj)["项目汇总"]
     chk("内容勾选 + 项目筛选一起生效（项目汇总只有 1 行数据）", ws.max_row == 2)
+
+    fin.export_to(pj, "xlsx", {"sections": ["clients"]})
+    wsc = load_workbook(pj)["客户汇总"]
+    head_c = [c.value for c in wsc[1]]
+    chk("客户汇总也多了「已核销」一列（插在「待收」后面）",
+        head_c[7] == "已核销" and head_c[6] == "待收")
 
     jp = os.path.join(out, "a.json")
     fin.export_to(jp, "json", {"sections": ["projects"]})
@@ -174,22 +198,32 @@ def main() -> int:
         set(j) == {"exported_at", "range", "year", "cards", "records"} and j["year"] == 0)
     chk("json 里的 range 是人话", j["range"] == "全部时间")
 
+    fin.export_to(jp, "json", {"sections": ["vendors"]})
+    with open(jp, encoding="utf-8") as f:
+        jv = json.load(f)
+    chk("json 勾外包商汇总 → vendors 段带出人名与已付金额",
+        set(jv) == {"exported_at", "range", "year", "vendors"}
+        and jv["vendors"][0]["vendor"] == "外协老王"
+        and jv["vendors"][0]["paid"] == 5000)
+
     cp = os.path.join(out, "a.csv")
     fin.export_to(cp, "csv", {"sections": ["projects"],
                               "date_from": "2026-01-01", "date_to": "2026-06-30"})
     with open(cp, encoding="utf-8-sig", newline="") as f:
         body = list(csv.reader(f))
-    chk("CSV 是一张平表：11 列（勾了项目汇总也只给明细）", len(body[0]) == 11)
-    chk("CSV 跟着时间范围走（1 行表头 + 3 行数据，实得 %d）" % (len(body) - 1),
-        len(body) == 4)
+    chk("CSV 是一张平表：12 列（勾了项目汇总也只给明细）", len(body[0]) == 12)
+    chk("CSV 跟着时间范围走（1 行表头 + 4 行数据，实得 %d）" % (len(body) - 1),
+        len(body) == 5)
+    chk("CSV 明细里出现了「核销」这一类（写中文名，不是 writeoff）",
+        "核销" in [r[1] for r in body[1:]])
 
     # ---- 6. 老路径不受影响 ----
     legacy = fin.export("xlsx")
     chk("老的 export(fmt) 仍写进导出目录",
         os.path.dirname(os.path.abspath(legacy)) == os.path.abspath(fin.export_dir()))
-    chk("老路径出来的还是四张表",
+    chk("老路径出来的还是五张表",
         load_workbook(legacy).sheetnames
-        == ["款项明细", "项目汇总", "客户汇总", "应收账龄"])
+        == ["款项明细", "项目汇总", "客户汇总", "外包商汇总", "应收账龄"])
 
     db.close()
     print()

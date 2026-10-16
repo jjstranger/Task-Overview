@@ -86,10 +86,20 @@ class Reminder:
                 names += f" 等 {len(a['stale'])} 项"
             parts.append("停滞：" + names)
         if a["due"]:
-            names = "、".join(x["title"] + " " + x["detail"] for x in a["due"][:3])
-            if len(a["due"]) > 3:
-                names += f" 等 {len(a['due'])} 项"
-            parts.append("临期：" + names)
+            # 结款逾期（已交付项目）跟制作临期混在一句「临期：」里读不出区别，
+            # 分开报：用户扫一眼就知道该催活还是该催钱。
+            def _line(items, head):
+                names = "、".join(x["title"] + " " + x["detail"] for x in items[:3])
+                if len(items) > 3:
+                    names += f" 等 {len(items)} 项"
+                return head + names
+
+            settle = [x for x in a["due"] if x.get("settle")]
+            normal = [x for x in a["due"] if not x.get("settle")]
+            if settle:
+                parts.append(_line(settle, "结款："))
+            if normal:
+                parts.append(_line(normal, "临期："))
         self._notify(f"{a['total']} 项需要关注", " ｜ ".join(parts))
 
     def _notify(self, title: str, msg: str) -> None:

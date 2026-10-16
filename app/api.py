@@ -247,6 +247,14 @@ class Api:
 
     def set_field(self, kind, oid, field, value):
         try:
+            if field == "artist_id":
+                # 「制作人」下拉框给过来的天然是字符串，空值**必须落成 NULL** ——
+                # 直接塞 "" 进 INTEGER 列会被存成空串，前端的"未分配"判据
+                # （`!n.artist_id`）就失灵了，而且行上会显示"制作人 "。
+                try:
+                    value = int(value or 0) or None
+                except (TypeError, ValueError):
+                    return {"ok": False, "msg": f"制作人 id 不对：{value!r}"}
             self._board.set_field(kind, int(oid), field, value)
         except ValueError as exc:
             # 字段名不在白名单时（前端和后端不同步）要把原因带出去，别静默失败
@@ -267,6 +275,15 @@ class Api:
     def delete(self, kind, oid):
         self._board.delete(kind, int(oid))
         return {"ok": True}
+
+    def bulk_delete(self, ids):
+        """多选批量删环节。跟 bulk_update 一样只收环节 —— 批量删除的
+        选择集就是多选那套（selNodes），而它只装环节 id。
+
+        返回 {ok, done, skipped, msg}：done 是**真正从库里消失的条数**
+        （选中的祖先会连带整棵子树），界面上说"删了 N 条"要跟实际对得上。
+        """
+        return self._board.bulk_delete(ids)
 
     def add_link(self, owner_type, owner_id, label, path):
         self._board.add_link(owner_type, int(owner_id), str(label).strip(), str(path).strip())
@@ -370,6 +387,25 @@ class Api:
         self._fin.delete(int(rid))
         return {"ok": True}
 
+    def finance_payoff_preview(self, project_id):
+        """结款前的预览：合同额 / 已收 / 已核销 / 待收 + 三侧记录清单，
+        只算数字、一个字节都不写库（界面拿它画确认弹层）。"""
+        try:
+            return {"ok": True, **self._fin.payoff_preview(project_id)}
+        except Exception as exc:
+            return {"ok": False, "msg": str(exc)}
+
+    def finance_payoff_apply(self, project_id):
+        """结款：把「核销」补到刚好盖住待收，让待收归零。
+
+        ⚠ 不再改合同额、也不再删合同额记录（2026-10-16 改）—— 见
+        `finance.payoff_apply` 的 docstring 与 DESIGN.md §4.5。
+        """
+        try:
+            return self._fin.payoff_apply(project_id)
+        except Exception as exc:
+            return {"ok": False, "msg": str(exc)}
+
     def finance_export_plan(self, opts=None):
         """只算「这批选项会导出成什么」，**不开任何对话框**。
 
@@ -455,6 +491,25 @@ class Api:
                 return {"ok": False, "msg": "没指定要删哪个客户"}
             self._fin.client_delete(cid)
         except Exception as exc:
+            return {"ok": False, "msg": str(exc)}
+        return {"ok": True}
+
+    def vendor_save(self, vid, payload):
+        """vid 传 0 / None / "" 都当成"新建"（跟 client_save 一个规矩）。"""
+        try:
+            new_id = self._fin.vendor_save(int(vid or 0) or None, payload or {})
+        except Exception as exc:
+            return {"ok": False, "msg": str(exc)}
+        return {"ok": True, "id": new_id}
+
+    def vendor_delete(self, vid):
+        try:
+            vid = int(vid or 0)
+            if not vid:
+                return {"ok": False, "msg": "没指定要删哪个外包商"}
+            self._fin.vendor_delete(vid)
+        except Exception as exc:
+            # 还挂着项目/环节/款项时后端会拒，原因原样带出来 —— 别吞成泛泛的"删除失败"
             return {"ok": False, "msg": str(exc)}
         return {"ok": True}
 

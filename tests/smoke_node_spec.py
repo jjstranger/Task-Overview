@@ -68,7 +68,45 @@ eq("短破折号 / 长破折号", node_spec.names("s006\u2013s009"), ["s006", "s
 eq("连续号夹在中间一起用", node_spec.names("s001,s006-008,s010"),
    ["s001", "s006", "s007", "s008", "s010"])
 
-# ---------- 4. 不该被展开的（字面量保护）----------
+# ---------- 4. 序列模板 `前缀####(起始-结束)` ----------
+eq("用户给的例子：WD####(12-20)", node_spec.names("WD####(12-20)"),
+   [f"WD{i:04d}" for i in range(12, 21)])
+eq("位数由 # 的个数定", node_spec.names("shot##(8-10)"),
+   ["shot08", "shot09", "shot10"])
+eq("前缀可以为空", node_spec.names("#(1-3)"), ["1", "2", "3"])
+eq("前缀可以很长", node_spec.names("EP01_WD####(1-2)"),
+   ["EP01_WD0001", "EP01_WD0002"])
+eq("倒序", node_spec.names("WD####(20-12)"),
+   [f"WD{i:04d}" for i in range(20, 11, -1)])
+eq("只写一个数也算（就建那一个）", node_spec.names("WD####(12-12)"), ["WD0012"])
+eq("全角括号", node_spec.names("WD####（12-20）"),
+   [f"WD{i:04d}" for i in range(12, 21)])
+eq("波浪号当范围符", node_spec.names("WD###（1~3）"), ["WD001", "WD002", "WD003"])
+eq("模板里的空格不算分隔符", node_spec.names("WD#### ( 12 - 20 )"),
+   [f"WD{i:04d}" for i in range(12, 21)])
+eq("跟连接号混着用", node_spec.names("s001,WD####(12-14)"),
+   ["s001", "WD0012", "WD0013", "WD0014"])
+
+# 宽度只加宽、不截短：写少了 # 也不会得到一堆长短不齐的名字
+_w = node_spec.names("WD##(8-105)")
+eq("宽度够时不补多余零", node_spec.names("WD##(8-10)"), ["WD08", "WD09", "WD10"])
+eq("宽度写小了自动加宽（首 / 中 / 末）", (_w[0], _w[1], _w[-1]), ("WD008", "WD009", "WD105"))
+eq("加宽后总数不变", len(_w), 98)
+
+# 字面量保护：不是模板写法的一个都不许动
+eq("引号仍能强制字面量", node_spec.names('"WD####(12-20)"'), ["WD####(12-20)"])
+eq("不含 # 的括号名不受影响", node_spec.names("WD(1-3)"), ["WD(1-3)"])
+eq("有 # 但没括号 → 字面量", node_spec.names("Phase#01"), ["Phase#01"])
+eq("纯 # 开头没括号 → 字面量", node_spec.names("#tag"), ["#tag"])
+eq("连续 #### 没括号 → 字面量", node_spec.names("WD####"), ["WD####"])
+
+# 写歪了要**当场报错**，不能静默建出一个叫 WD####(12) 的环节
+bad("范围只写一端", "WD####(12)", "看不懂")
+bad("范围缺上界", "WD####(12-)", "看不懂")
+bad("范围不是数字", "WD##(a-b)", "看不懂")
+bad("序列跨度太大", "WD####(1-500)", "跨度太大")
+
+# ---------- 5. 不该被展开的（字面量保护）----------
 eq("SANTI-OneDay：左边没有数字尾巴", node_spec.names("SANTI-OneDay"), ["SANTI-OneDay"])
 eq("shot-001：左边没有数字尾巴", node_spec.names("shot-001"), ["shot-001"])
 eq("s001_alpha：右边不是数字结尾", node_spec.names("s001_alpha"), ["s001_alpha"])
@@ -83,7 +121,7 @@ eq("中文名照常", node_spec.names("建模,绑定,渲染"), ["建模", "绑�
 # 顺带记录：这类写法**会被**展开（不是 bug，是约定；界面里有实时预览兜底）
 eq("phase1-3 会被当连续号", node_spec.names("phase1-3"), ["phase1", "phase2", "phase3"])
 
-# ---------- 5. 去重与上限 ----------
+# ---------- 6. 去重与上限 ----------
 eq("大小写重复只留一个", node_spec.names("s001,S001,s001"), ["s001"])
 eq("重复的连续号", node_spec.names("s001-s003,s002"), ["s001", "s002", "s003"])
 
@@ -92,7 +130,7 @@ bad("只有分隔符", " , ; ")
 bad("单个连续号跨太大", "s001-900", "跨度太大")
 bad("总量超上限", ",".join(f"s{i:03d}" for i in range(1, 520)), "最多建")
 
-# ---------- 6. 预览接口 ----------
+# ---------- 7. 预览接口 ----------
 pv = node_spec.preview("s001,s003A,s006-009")
 assert pv["ok"] is True and pv["count"] == 6, pv
 assert pv["items"][-1] == "s009", pv
@@ -100,7 +138,16 @@ assert pv["items"][-1] == "s009", pv
 bad_pv = node_spec.preview("  ")
 assert bad_pv["ok"] is False and bad_pv["count"] == 0 and bad_pv["msg"], bad_pv
 
-# ---------- 7. 与 API 的连接（跳过的逻辑在 api.add_nodes）----------
+# 序列模板在预览里也得展开（用户是按预览决定要不要点「创建」的）
+pv_seq = node_spec.preview("WD####(12-20)")
+assert pv_seq["ok"] is True and pv_seq["count"] == 9, pv_seq
+assert (pv_seq["items"][0], pv_seq["items"][-1]) == ("WD0012", "WD0020"), pv_seq
+
+# 写歪了预览要**红着**（ok=False + 有话说），不能假装没事
+pv_bad = node_spec.preview("WD####(12)")
+assert pv_bad["ok"] is False and pv_bad["count"] == 0 and "看不懂" in pv_bad["msg"], pv_bad
+
+# ---------- 8. 与 API 的连接（跳过的逻辑在 api.add_nodes）----------
 import tempfile  # noqa: E402
 
 from api import Api  # noqa: E402
@@ -137,6 +184,20 @@ eq("跨度太大要拒绝", r5["ok"], False)
 # 大小写不同也算已存在（Windows 上本来就是同一个名字）
 r6 = api.add_nodes(pid, None, "S001")
 eq("大小写重复也跳过", (r6["count"], len(r6["skipped"])), (0, 1))
+
+# 序列模板走的是**同一条落库路**，也要真建出来看看（不是只看预览）
+r7 = api.add_nodes(pid, None, "WD####(12-20)")
+eq("序列模板真建出 9 个", (r7["ok"], r7["count"], r7["created"][0], r7["created"][-1]),
+   (True, 9, "WD0012", "WD0020"))
+eq("库里确实多了这 9 个", len(api._board.child_titles(pid, None)), 7 + 9)
+
+r8 = api.add_nodes(pid, None, "WD####(12-20)")
+eq("序列再提交一次同样全跳过", (r8["count"], len(r8["skipped"])), (0, 9))
+
+r9 = api.add_nodes(pid, None, "WD####(12)")
+eq("写歪的序列在 API 层被拒（并带回正确写法）",
+   (r9["ok"], "看不懂" in (r9.get("msg") or "")), (False, True))
+eq("被拒之后库里没多东西", len(api._board.child_titles(pid, None)), 7 + 9)
 
 db.close()
 print(f"node spec smoke: OK（{n} 项断言）")

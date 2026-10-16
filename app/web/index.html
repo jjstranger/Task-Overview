@@ -55,11 +55,12 @@
 
   <div id="bulkBar">
     <span class="cnt" id="bulkCnt">已选 0 条</span>
-    <span class="hint" id="bulkHint" title="Ctrl 加/减选，Shift 范围选。">Ctrl 加/减选，Shift 范围选。</span>
+    <span class="hint" id="bulkHint" title="点一条 = 加选（再点它 = 取消），Shift = 范围选。">点一条加选，再点取消；Shift 范围选。</span>
     <button id="bulkStat">改状态 ▾</button>
     <button id="bulkArtist">改制作人 ▾</button>
     <button id="bulkDue">改截止日期 ▾</button>
     <button id="bulkNote">改备注 ▾</button>
+    <button id="bulkDel" class="warn">删除</button>
     <button id="bulkNone">清空</button>
     <button id="bulkExit">退出多选</button>
   </div>
@@ -95,25 +96,46 @@
       <select id="finClient"></select>
       <div class="spacer"></div>
       <button id="finClientsBtn">客户</button>
+      <button id="finVendorsBtn">外包商</button>
       <button id="finExport">导出 ▾</button>
       <button id="finAdd" class="on">＋ 记一笔</button>
     </div>
 
     <div id="finCards"></div>
 
+    <!-- 四组数据做成**可切换标签页**（2026-10-16 用户要求：省纵向空间）。
+         顺序按用户定的：项目款项（默认）/ 客户汇总 / 外包商汇总 / 应收账龄（放最后）。
+         ⚠ 切 tab 只改显隐、**不重渲染** —— 表已经画好了，重画一遍纯属浪费；
+           `loadFinance()` 也不会把当前 tab 重置回项目款项（finTab 是模块变量，
+           只在用户点按钮时才变）。所以切年份 / 切客户后，你还停在原来那一页。 -->
     <div class="fsec">
-      <div class="fsecth">项目款项 <span class="fk" id="finQ"></span></div>
-      <div id="finTable"></div>
-    </div>
+      <div class="ftabs" id="finTabs">
+        <button data-t="prj" class="act">项目款项</button>
+        <button data-t="cli">客户汇总</button>
+        <button data-t="vdr">外包商汇总</button>
+        <button data-t="age">应收账龄</button>
+      </div>
 
-    <div class="fsec">
-      <div class="fsecth">应收账龄</div>
-      <div id="finAging"></div>
-    </div>
+      <div id="fsPrj">
+        <div class="fsecth">项目款项 <span class="fk" id="finQ"></span></div>
+        <div id="finTable"></div>
+      </div>
 
-    <div class="fsec">
-      <div class="fsecth">客户汇总</div>
-      <div id="finClientSum"></div>
+      <div id="fsCli" style="display:none">
+        <div class="fsecth">客户汇总</div>
+        <div id="finClientSum"></div>
+      </div>
+
+      <div id="fsVdr" style="display:none">
+        <!-- 外包商汇总（2026-10-16 打通）：跟客户汇总对称，回答"钱付给了谁、还欠谁多少" -->
+        <div class="fsecth">外包商汇总</div>
+        <div id="finVendorSum"></div>
+      </div>
+
+      <div id="fsAge" style="display:none">
+        <div class="fsecth">应收账龄</div>
+        <div id="finAging"></div>
+      </div>
     </div>
 
     <div class="hint" id="finTip" style="margin-top:14px"></div>
@@ -123,7 +145,7 @@
 <footer id="foot"></footer>
 
 <div class="ov" id="ovNew">
-  <div class="ovbox" style="width:520px">
+  <div class="ovbox" style="width:580px">
     <h3>新建项目</h3>
     <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="newTitle" placeholder="输入项目名，可用中文。"></div>
     <div class="fld"><div class="lb">分类</div><div class="seg" id="segCat"></div></div>
@@ -143,20 +165,70 @@
         <span class="dph" id="newDlPh">YYYY/MM/DD</span>
       </div>
     </div>
+    <!-- 结款日期：跟截止日期一样是原生 date 框 + 自绘占位（道理见上面那段）。
+         它比截止日期更重要 —— 已交付项目的「结款逾期 N 天」**只认它**，
+         空着就永远不报（不再拿交付日期推算）。 -->
+    <div class="fld"><div class="lb">结款日期</div>
+      <div class="dwrap" style="width:170px">
+        <input type="date" id="newSettle">
+        <span class="dph" id="newSettlePh">YYYY/MM/DD</span>
+      </div>
+      <span class="hint">约定结款日，可留空</span>
+    </div>
     <div class="fld"><div class="lb">客户</div>
       <input type="text" id="newClient" list="clientOpts" placeholder="选已有客户，或直接输入新名字" style="max-width:240px">
       <datalist id="clientOpts"></datalist>
+      <!-- 外包商候选（2026-10-16）：项目设置页的「制作人」和「记一笔」的外包商
+           共用这一份。datalist 是文档级的，放这儿各处都能 list="vendorOpts"。 -->
+      <datalist id="vendorOpts"></datalist>
     </div>
-    <div class="fld"><div class="lb">合同额</div>
+    <div class="fld amtrow"><div class="lb">合同额</div>
       <input type="text" id="newAmount" placeholder="可留空" style="max-width:120px">
       <span class="hint">元</span>
       <span class="hint">税率%</span><input type="text" id="newTax" style="max-width:56px">
+      <!-- 填了税率才冒出来的「税后」提示：只是显示，不进任何存储 / 汇总口径 -->
+      <span class="hint net" id="newNet"></span>
     </div>
     <div class="fld"><div class="lb">首款到账</div>
       <input type="text" id="newPaid" placeholder="可留空" style="max-width:120px">
       <span class="hint">日期</span><input type="date" id="newPaidDate" style="max-width:150px">
     </div>
     <div class="closebar"><button id="newCancel">取消</button><button id="newOk" class="on">创建</button></div>
+  </div>
+</div>
+
+<!-- 项目设置（2026-10-13 新增）：⋯ 菜单里原本散着「编辑截止日期 / 改客户 / 改分类」，
+     一次只能改一样、还都要先找到那一行。现在合成一页，版面照抄新建项目，
+     改完一次保存。**名称也在这一页** —— 改名以前只能双击标题（一不留神就改坏）。
+     ⚠ 金额不在这里：那是「登记款项」的事，两处都能改必然出现"哪边为准"。 -->
+<div class="ov" id="ovPrjSet">
+  <div class="ovbox" style="width:520px">
+    <h3>项目设置</h3>
+    <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="psTitle"></div>
+    <div class="fld"><div class="lb">分类</div><div class="seg" id="psSegCat"></div></div>
+    <div class="fld"><div class="lb">客户</div>
+      <input type="text" id="psClient" list="clientOpts" placeholder="选已有客户，或直接输入新名字" style="max-width:240px">
+    </div>
+    <!-- 制作人（2026-10-16 强关联到外包商名录）：候选来自 #vendorOpts，
+         敲新名字会自动建一条外包商。清空 = 未分配。 -->
+    <div class="fld"><div class="lb">制作人</div>
+      <input type="text" id="psArtist" list="vendorOpts" placeholder="选已有，或直接输入新名字" style="max-width:240px">
+    </div>
+    <div class="fld"><div class="lb">截止日期</div>
+      <div class="dwrap" style="width:170px">
+        <input type="date" id="psDl">
+        <span class="dph">YYYY/MM/DD</span>
+      </div>
+    </div>
+    <div class="fld"><div class="lb">结款日期</div>
+      <div class="dwrap" style="width:170px">
+        <input type="date" id="psSettle">
+        <span class="dph">YYYY/MM/DD</span>
+      </div>
+      <span class="hint">已交付后按它算「结款逾期」，留空则不报</span>
+    </div>
+    <div class="fld"><div class="lb">项目根目录</div><input type="text" id="psPath" placeholder="可留空"><button id="psPick">浏览</button></div>
+    <div class="closebar"><button id="psCancel">取消</button><button id="psOk" class="on">保存</button></div>
   </div>
 </div>
 
@@ -233,34 +305,64 @@
 </div>
 
 <div class="ov" id="ovFin">
-  <div class="ovbox" style="width:520px">
+  <div class="ovbox" style="width:580px">
     <h3 id="finTitle">记一笔</h3>
-    <p class="sub">合同额 / 到账 / 外包支出分开记，汇总口径：待收 = 合同额 − 已收，实际收入 = 已收 − 外包支出。开票金额只进导出的表格，不在看板上展示。</p>
+    <p class="sub">汇总口径：待收 = 合同额 − 已收 − 已核销，实际收入 = 已收 − 外包支出。开票金额只进导出的表格，不在看板上展示。</p>
     <div class="fld" style="border-top:none"><div class="lb">类型</div>
       <div class="seg" id="finKind">
         <button data-k="contract">合同额</button>
         <button data-k="payment" class="act">到账</button>
         <button data-k="outsource">外包支出</button>
         <button data-k="invoice">开票</button>
+        <button data-k="writeoff">核销</button>
       </div>
     </div>
     <div class="fld"><div class="lb">项目</div><select id="finPrj"></select></div>
     <div class="fld"><div class="lb">挂到</div>
       <select id="finNode"><option value="">项目整体</option></select>
-      <span class="hint">可选，比如分批款对应某个环节</span>
     </div>
-    <div class="fld"><div class="lb">金额</div>
+    <!-- 外包商：只在类型 =「外包支出」时露头，而且**必填**（2026-10-16）。
+         跟客户框一样是可输入的下拉 —— 直接敲个新名字就自动建条目。 -->
+    <div class="fld" id="finVendorRow" style="display:none"><div class="lb">外包商</div>
+      <input type="text" id="finVendor" list="vendorOpts" placeholder="选一个（必填）" style="max-width:240px">
+    </div>
+    <div class="fld amtrow"><div class="lb">金额</div>
       <input type="text" id="finAmount" placeholder="0.00" style="max-width:150px">
       <span class="hint">元</span>
       <span class="hint">税率%</span><input type="text" id="finTax" style="max-width:60px">
+      <!-- 同上：税率填了才出现的「税后」提示 -->
+      <span class="hint net" id="finNet"></span>
     </div>
     <div class="fld"><div class="lb">日期</div><input type="date" id="finDate" style="max-width:170px"></div>
     <div class="fld"><div class="lb">状态</div><select id="finStatus"></select></div>
     <div class="fld" id="finInvRow"><div class="lb">发票号</div><input type="text" id="finInvNo" placeholder="可留空"></div>
     <div class="fld"><div class="lb">备注</div><input type="text" id="finNote" placeholder="可留空"></div>
+    <!-- 结款：把收不齐的待收核销掉，让项目能收尾。只在类型=「到账」时出现。
+         ⚠ 2026-10-16 改了语义：**不改合同额、不删任何记录**。合同签了多少就是多少，
+         收不齐由一条「核销」记录承担，收款率因此保持诚实（15 万收 12 万 = 80%，
+         而不是把分母改小后的 100%）。 -->
+    <div class="fld" id="finPayoffRow" style="display:none">
+      <button id="finPayoff" class="warn">结款（核销待收）</button>
+      <span class="hint">项目结款，并核销掉差额。</span>
+    </div>
     <div class="closebar">
       <button id="finDel" style="display:none;margin-right:auto;color:var(--red)">删除这笔</button>
       <button id="finCancel">取消</button><button id="finOk" class="on">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 结款确认：把账摊开写（合同额 − 已收 = 待收 → 核销后归零），看清楚了再点。
+     ⚠ 自绘而不是 window.confirm —— 原生弹窗会卡住 JS 线程（diag.js 里记过这个坑），
+     而且这里要把到账记录一条条列出来，confirm 也做不到。 -->
+<div class="ov" id="ovPayoff">
+  <div class="ovbox" style="width:560px">
+    <h3>结款（核销待收）</h3>
+    <p class="sub" id="payHead"></p>
+    <div class="prev" id="payList"></div>
+    <p class="sub" id="payFoot"></p>
+    <div class="closebar">
+      <button id="payCancel">取消</button><button id="payOk" class="on">确认结款</button>
     </div>
   </div>
 </div>
@@ -331,6 +433,7 @@
     <div class="hint" style="line-height:1.9">
       使用英文 <b>逗号 / 分号 / 空格 / 换行</b> 分隔可创建多个环节名，使用<b>连接号 -</b> 创建多个含有连续编号的环节。<br>
       例：<code>s001,s003A,s006-009</code> → s001 · s003A · s006 · s007 · s008 · s009<br>
+      要固定编号位数就用 <code>#</code> 占位、范围写进括号：<code>WD####(12-20)</code> → WD0012 … WD0020（<b>几个 <code>#</code> 就是几位</b>）<br>
       名字含有连接号但需要其不展开时，可使用英文双引号，如: <code>"S003-006"</code>
     </div>
     <div class="prev" id="nodesPrev"></div>
@@ -357,6 +460,55 @@
       <button id="cliReset" style="margin-right:auto">清空表单</button>
       <button id="cliClose">关闭</button>
       <button id="cliSave" class="on">保存客户</button>
+    </div>
+  </div>
+</div>
+
+<!-- 外包商 / 制作人（2026-10-16）：照客户弹窗做的 —— 上面是列表（点行 ⋯ 编辑/删除），
+     下面是表单。它同时是「项目 / 环节的制作人」和「外包支出的收款方」，
+     所以这一份名单两处都在用。 -->
+<div class="ov" id="ovVendor">
+  <div class="ovbox" style="width:560px">
+    <h3>外包商 / 制作人</h3>
+    <div id="vdrList"></div>
+    <div class="fld" style="border-top:none"><div class="lb">名称</div><input type="text" id="vdrName" placeholder="个人姓名，或工作室 / 团队名"></div>
+    <div class="fld"><div class="lb">类型</div>
+      <div class="seg" id="vdrKind">
+        <button type="button" data-k="个人" class="act">个人</button>
+        <button type="button" data-k="团队">团队</button>
+      </div>
+    </div>
+    <div class="fld"><div class="lb">联系方式</div><input type="text" id="vdrContact" placeholder="微信 / 电话 / 邮箱，随便写"></div>
+    <div class="fld"><div class="lb">备注</div><input type="text" id="vdrNote" placeholder="可留空"></div>
+    <!-- 删除入口跟客户一样放在列表行右边的 ⋯ 里（点哪行删哪行）：
+         还有项目 / 环节 / 款项挂着他时后端会拒，原因原样带出来。 -->
+    <div class="closebar">
+      <button id="vdrReset" style="margin-right:auto">清空表单</button>
+      <button id="vdrClose">关闭</button>
+      <button id="vdrSave" class="on">保存外包商</button>
+    </div>
+  </div>
+</div>
+
+<!-- 日期选择（2026-10-16）：环节 ⋯ 菜单的「编辑截止日期」（以及多选批量改日期）
+     原来是 prompt 手输，用户要求给一个**日历选择控件**。
+     用原生 <input type="date">：它自带日历弹窗，而且根本输不进非法格式
+     （非 ISO 串赋值会被它自己丢掉），比 prompt + 事后校验可靠。
+     ⚠ .dwrap + .dph 跟新建页 / 设置页那四个日期框是**同一套**（自绘 YYYY/MM/DD 占位），
+     别再另写一份 —— 那套的坑（空值 mask 在 UA shadow DOM 里、改不了）style.css 记过。 -->
+<div class="ov" id="ovDate">
+  <div class="ovbox" style="width:420px">
+    <h3 id="dateTitle">编辑截止日期</h3>
+    <p class="sub" id="dateSub"></p>
+    <div class="fld" style="border-top:none"><div class="lb">截止日期</div>
+      <div class="dwrap" style="width:170px">
+        <input type="date" id="dateInput">
+        <span class="dph">YYYY/MM/DD</span>
+      </div>
+    </div>
+    <div class="closebar">
+      <button id="dateClear" style="margin-right:auto;color:var(--red)">清空日期</button>
+      <button id="dateCancel">取消</button><button id="dateOk" class="on">保存</button>
     </div>
   </div>
 </div>

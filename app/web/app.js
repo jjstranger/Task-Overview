@@ -18,6 +18,11 @@ const C = {
 /* 「收工态」：不再显示到期倒计时（跟后端 models.CLOSED_ALL 对齐） */
 const CLOSED = new Set(["通过", "交付", "中止", "已交付", "已结款", "归档"]);
 
+/* 不算「停滞」的项目状态（跟后端 models.STALE_SKIP 逐字对齐）：
+   筹备（还没开工，谈不上停滞）、已交付（制作结束，改盯结款逾期）、
+   已结款 / 归档（收工）。 */
+const STALE_SKIP = new Set(["筹备", "已交付", "已结款", "归档"]);
+
 /* 星期表只有这一份（顶栏日期、变更记录的分组头都用它） */
 const WD_CN = "日一二三四五六";
 
@@ -215,7 +220,10 @@ function nodeMatch(n, f) {
   if (!nfOn(f)) return true;
   /* 多选 = 白名单：命中集合里任一个就算通过 */
   if (f.st && f.st.length && !hasWord(f.st, n.status)) return false;
-  if (f.who && f.who.length && !hasWord(f.who, n.artist || "")) return false;
+  /* 制作人按 **id** 比（2026-10-16 强关联后）。`hasWord` 是严格相等（indexOf），
+     所以两边都得是字符串：`f.who` 里存的就是 String(id)，
+     `artist_id` 为 null（未分配）时 `String(null || "")` = ""，正好对上 WHO_NONE。 */
+  if (f.who && f.who.length && !hasWord(f.who, String(n.artist_id || ""))) return false;
   if (f.t && !txtHit(n, f.t)) return false;
   return true;
 }
@@ -224,19 +232,29 @@ function nodeKeep(n, f) {
   if (!n.children || !n.children.length) return nodeMatch(n, f);
   return nodeMatch(n, f) || n.children.some((c) => nodeKeep(c, f));
 }
-/* 制作人清单：本层往下摘（库里没单独存人），只列这棵子树里真有人在做的 */
+/* 外包商 id → 名字。找不到（条目被删了）要说清楚，别在界面上冒个裸 id。 */
+function vendorName(id) {
+  if (!id) return WHO_NONE_LABEL;
+  const v = (D.vendors || []).find((x) => String(x.id) === String(id));
+  return v ? v.name : "（已删除）";
+}
+/* 制作人清单：本层往下摘，收集的是 **vendor id**（2026-10-16 强关联后）。
+   ⚠ 以前收名字字符串，改 id 是因为"人是一个实体"—— 只按名字比，改个名
+   筛选条件就失配了，那等于白关联。老筛选状态里存的名字会筛出空，
+   重选一次即可（筛选本来就是临时态，不进库）。 */
 function subArtists(n) {
   const set = new Set();
   const walk = (list) => (list || []).forEach((x) => {
-    if (x.artist) set.add(x.artist);
+    if (x.artist_id) set.add(String(x.artist_id));
     walk(x.children);
   });
   walk(n.children);
-  return Array.from(set).sort();
+  return Array.from(set).sort((a, b) => vendorName(a).localeCompare(vendorName(b), "zh"));
 }
-/* 制作人筛选里「未分配」那个篮子 —— 值直接用 artist 的**空串**。
-   为什么用空串而不是另造一个哨兵词：`nodeMatch` 判的是 `n.artist || ""`，
-   空串天然对齐，不用再翻译一层；换哨兵就得在两处各写一次映射，迟早歪。
+/* 制作人筛选里「未分配」那个篮子 —— 值直接用**空串**。
+   为什么用空串而不是另造一个哨兵词：`nodeMatch` 判的是
+   `String(n.artist_id || "")`，空串天然对齐，不用再翻译一层；
+   换哨兵就得在两处各写一次映射，迟早歪。
    ⚠ 空串放在**数组里**是安全的：nfSet 只把「空数组」当成没条件，
    长度不为 0 的 `[""]` 会照常存下来。 */
 const WHO_NONE = "";
@@ -245,7 +263,7 @@ const WHO_NONE_LABEL = "（未分配）";
    ⚠ 判据必须跟 subArtists 用**同一个范围**（整棵子树）：筛选是按层施加、
    逐级向下判的，只看直属子级的话，人挂在更深的环节上就会漏判。 */
 function subHasNone(n) {
-  const walk = (list) => (list || []).some((x) => !x.artist || walk(x.children));
+  const walk = (list) => (list || []).some((x) => !x.artist_id || walk(x.children));
   return walk(n && n.children);
 }
 /* 制作人这组条件的行上摘要。单个就直说；带「未分配」时两类分开数 ——
@@ -254,9 +272,9 @@ function whoLabel(arr) {
   const a = arr || [];
   const names = a.filter((w) => w);
   const none = a.some((w) => !w);
-  if (names.length === 1 && !none) return "@" + names[0];
+  if (names.length === 1 && !none) return "@" + vendorName(names[0]);
   const parts = [];
-  if (names.length === 1) parts.push("@" + names[0]);
+  if (names.length === 1) parts.push("@" + vendorName(names[0]));
   else if (names.length > 1) parts.push(names.length + " 人");
   if (none) parts.push("未分配");
   return parts.join("+");
@@ -382,7 +400,9 @@ function openNodeFilter(n, kind, anchor) {
     ] });
     who.forEach((w) => {
       items.push({
-        label: (hasWord(cur().who, w) ? "✓ " : "　") + w,
+        /* ⚠ `w` 是 vendors.id（2026-10-16 起强关联）—— 菜单上必须翻成名字，
+           直接写 w 的话这一列会变成一串数字。 */
+        label: (hasWord(cur().who, w) ? "✓ " : "　") + vendorName(w),
         keep: true,
         fn: () => set({ who: flipWord(cur().who, w) }),
       });
@@ -484,6 +504,16 @@ function staleDays() {
   const v = parseInt(((D && D.settings) || {}).stale_days || "", 10);
   return (isFinite(v) && v > 0) ? v : 3;
 }
+/* 「结款逾期」几天：约定结款日 → 今天。判据的唯一实现是后端 models.settle_gap()，
+   这里只能逐字对齐（底栏 N / 告警列表 / 行上红字必须同一个数）。
+   **只认用户填的结款日期（settle_date）**，不再拿交付日期推算（2026-10-13 用户定的）：
+   空着就不报 —— 老项目不会凭空冒出一个跟合同无关的"逾期"。
+   结款当天（0 天）也不算，从第 1 天起算。 */
+function settleDays(s) {
+  const d = daysLeft(s);
+  if (d === null || d >= 0) return null;
+  return -d;
+}
 function isStale(p) {
   const thr = staleDays();
   const la = maxAct(p);
@@ -492,10 +522,10 @@ function isStale(p) {
   const t = parseDay(String(la).replace(" ", "T"));
   if (!t) return false;                    // 时间戳坏了：算不出停滞，别误报
   const gap = (Date.now() - t.getTime()) / 86400000;
-  /* 判据的唯一实现是后端 models.stale_gap()（含 STALE_SKIP 那两条收工状态）。
+  /* 判据的唯一实现是后端 models.stale_gap()（含 STALE_SKIP 那四条收工态）。
      这里只能逐字对齐 —— 底栏「停滞 N」、告警列表、行上这个小标必须同一个数，
      对不上用户第一反应就是"数据不对"。改后端那个元组时记得回来改这行。 */
-  return gap >= thr && p.status !== "归档" && p.status !== "已结款";
+  return gap >= thr && !STALE_SKIP.has(p.status);
 }
 /* 拼 HTML 时一律过这里。单引号也转 —— 目前属性都用双引号所以没炸过，
    但少一个字符就是给以后留一颗雷（`title='...'` 一写就破）。 */
@@ -543,14 +573,34 @@ function popup(items, anchor, head) {
     }
     const d = document.createElement("div");
     d.textContent = it.label;
-    /* dim = 灰（不可点的说明项），danger = 红（删除这类破坏性动作） */
+    /* dim = 灰（纯说明项，不该指望点它）
+       danger = 红（删除这类破坏性动作）—— 两种语义别混用 */
     const cls = [it.dim ? "dim" : "", it.danger ? "danger" : ""].filter(Boolean).join(" ");
     if (cls) d.className = cls;
     d.onclick = () => {
       /* keep = 点了别关弹层。多选（勾状态 / 勾制作人）是一个个勾的，
          每勾一下关一次、还得再点开一次没法用；fn 负责把菜单重开一遍。 */
       if (!it.keep) closePopup();
-      if (it.fn) it.fn();
+      if (!it.fn) return;
+      /* ⚠ fn 大多是 async → 抛错会变成 rejected Promise。
+         以前这里是裸调用：异常**只**被 app.js 那个 unhandledrejection 记进
+         window.__err，界面上一点动静都没有 —— 用户看到的就是"点了没反应"
+         （2026-10-10 的删除 bug 正是这么藏了不知多久）。
+         破坏性操作失败必须说出来，所以这里显式兜住并 alert。 */
+      try {
+        const r = it.fn();
+        if (r && typeof r.then === "function") {
+          r.catch((e) => {
+            const msg = (e && e.message) || String(e);
+            window.__err = window.__err || msg;
+            alert("这个操作没成功：\n\n" + msg);
+          });
+        }
+      } catch (e) {
+        const msg = (e && e.message) || String(e);
+        window.__err = window.__err || msg;
+        alert("这个操作没成功：\n\n" + msg);
+      }
     };
     p.appendChild(d);
   });
@@ -954,13 +1004,24 @@ function rowHTML(n, kind, hasKids, open, a, b, tag, stale, f) {
 }
 
 /* 「还剩几天」那颗小标。没有期限或日期坏了就空着。
-   文案跟后端 `models._due_label()` 逐字一致 —— 「D-1」「今天」这种记号
-   用户得先知道 D 是 deadline 才读得懂，一律写成整句话。 */
+   文案跟后端 `models._due_label()` / `_settle_label()` 逐字一致 ——
+   「D-1」「今天」这种记号用户得先知道 D 是 deadline 才读得懂，一律写成整句话。
+
+   2026-10-13 起分两条线（用户定的）：
+     · 已交付 → 不报制作逾期，改报「结款逾期 N 天」（起算日是**用户填的结款日期**，
+       不是 deadline、也不再拿交付日期推算；没填就不报）。判定必须在 CLOSED 那一跳
+       **之前** —— 已交付也在收工态里。
+     · 其余 → 「制作逾期 N 天」（原先是「逾期 N 天」，跟结款那个并排会分不清） */
 function dueTag(n) {
+  const cls = 'meta due';
+  if (n.status === "已交付") {
+    const g = settleDays(n.settle_date);
+    if (g === null) return "";
+    return '<div class="' + cls + '" style="color:var(--red)">结款逾期 ' + g + " 天</div>";
+  }
   const d = daysLeft(deadlineOf(n));
   if (d === null || CLOSED.has(n.status)) return "";
-  const cls = 'meta due';
-  if (d < 0) return '<div class="' + cls + '" style="color:var(--red)">逾期 ' + (-d) + " 天</div>";
+  if (d < 0) return '<div class="' + cls + '" style="color:var(--red)">制作逾期 ' + (-d) + " 天</div>";
   if (d === 0) return '<div class="' + cls + '" style="color:var(--amber)">今天到期</div>';
   if (d <= 3) return '<div class="' + cls + '" style="color:var(--amber)">' + d + " 天后到期</div>";
   return '<div class="' + cls + '">' + d + " 天后到期</div>";
@@ -1043,17 +1104,15 @@ function multiClick(n, ev) {
     selOne(n, undefined);            // 加选 / 减选（连带后代）
     selAnchor = id;
   } else {
-    /* 直接点 = **单选**：先把选择集清干净，再选这一条（连带后代）。
-       以前这里只是"取反"，点第二条时第一条还留着 —— 表现就是
-       "不按任何键却在累加"，用户的原话是"现在是加减选模式"。
-       例外：这一棵已经是**唯一选中**的时候，再点一下 = 全部取消
-       （列表习惯：连点两次同一条等于没选，不用去按 Ctrl）。 */
-    const ids = selfAndDescendants(n);
-    const cur = Array.from(selNodes);
-    const alone = cur.length > 0 && cur.length === ids.length
-      && ids.every((i) => selNodes.has(i));
-    selClear();
-    if (!alone) selOne(n, true);
+    /* 直接点 = **加选**（用户 2026-10-10 定）。
+       历史：最早这里是"取反"，点第二条第一条还留着 —— 表现是
+       "不按任何键却在累加"，用户说"现在是加减选模式"；于是改成
+       "先把选择集清干净再选这一条"（真单选）；现在用户又要回来：
+       **多选模式下不按任何键就是加选**，跟 Ctrl 点等价。
+       所以 Shift = 范围选、Ctrl/无键 = 加选，两种修饰键的分工现在很清楚。
+       连点同一条仍然等于取消（selOne 内部按显示态取反，见那边的注释：
+       已选 → 撤、残缺 → 补齐整棵）—— 这是列表的老习惯，留着。 */
+    selOne(n, undefined);
     selAnchor = id;
   }
 }
@@ -1168,9 +1227,10 @@ function bindRename(r, n, kind) {
      多选模式下，改**任意一条选中项**的状态 = 改所有选中项（用户 2026-10-02 要的）。 */
   r.querySelector(".badge.st").onclick = (ev) => {
     /* ⚠ 必须拦住冒泡：不拦的话这一下会继续冒到整行，被 multiClick 当成
-       「直接点 = 单选」→ 选择集被清成只剩这一条。而 ids 是**冒泡前**就抓好的
-       （多条），于是出现"确实改了一批、屏幕上却只剩一个勾着"的怪象
-       （2026-10-03 用户报的）。`.meta.who` 那边一直有这句，所以只有状态徽章中招。 */
+       一次选择点击 → 选择集被就地改掉，而 ids 是**冒泡前**就抓好的（多条），
+       于是出现"确实改了一批、屏幕上的勾却对不上"的怪象
+       （2026-10-03 用户报的；当时无修饰键=单选，表现为只剩一条勾着）。
+       `.meta.who` 那边一直有这句，所以只有状态徽章中招。 */
     ev.stopPropagation();
     const el = r.querySelector(".badge.st");
     const list = kind === "project" ? D.status.project : D.status.node;
@@ -1190,8 +1250,8 @@ function bindRename(r, n, kind) {
 
   /* 制作人 / 备注 / 截止日期：跟状态徽章对称 —— 点一下就能改，
      多选时（且这条被选上）改一整批。三个入口共用 editField，改法只有一份。
-     ⚠ 每个入口都要 stopPropagation，理由同状态徽章：冒泡到整行会被当成
-     「直接点 = 单选」，选择集当场只剩这一条。 */
+     ⚠ 每个入口都要 stopPropagation，理由同状态徽章：冒泡到整行会当成
+     "这是一次选择点击"，把选择集就地改掉。 */
   const clickable = (sel, field, tip) => {
     const el = r.querySelector(sel);
     if (!el) return;
@@ -1232,32 +1292,39 @@ function bindRename(r, n, kind) {
 
   /* 操作菜单 */
   r.querySelector(".mini.more").onclick = () => {
-    const items = [
-      { label: "新增子环节", fn: () => {
-          /* 一次可以填一整批：`s001,s003A,s006-009`，弹窗里有实时预览 */
-          const prj = findProject(kind === "project" ? n.id : n.pid);
-          const label = kind === "project"
-            ? n.title
-            : ((prj ? prj.title : "项目") + " › " + n.title);
-          openNodesDialog(
-            kind === "project" ? n.id : n.pid,
-            kind === "project" ? null : n.id,
-            label
-          );
-      } },
-      /* 截止日期 / 备注 / 制作人：多选且这条被选上 → 菜单给候选、改一整批
-         （跟点行上那三处 .meta 一个待遇）；否则 prompt 改这一条。 */
-      { label: "编辑截止日期", fn: () => editField(n, kind, "deadline", r.querySelector(".mini.more")) },
-      { label: "编辑备注", fn: () => editField(n, kind, "note", r.querySelector(".mini.more")) },
-      { label: n.artist ? "编辑制作人（" + n.artist + "）" : "编辑制作人",
-        fn: () => editField(n, kind, "artist", r.querySelector(".mini.more")) },
-    ];
+    const anchor = r.querySelector(".mini.more");
+    const items = [];
+    /* 项目设置（2026-10-13 新增）：名称 / 分类 / 客户 / 截止日期 / 结款日期 /
+       项目根目录 一页改完。这三样（截止日期、客户、分类）原本散在这个菜单里，
+       一次只能改一样、还都得先找到那一行 —— 全收进设置页了。
+       ⚠ 只给项目：环节没有"设置页"，它的截止日期还得留在这个菜单里。 */
     if (kind === "project") {
-      items.push({ label: n.client ? "改客户（" + n.client + "）" : "指定客户…",
-        fn: () => pickClientFor(n, r.querySelector(".mini.more")) });
-      /* 分类能改、能新建（新建完把这个项目直接挪过去）。 */
-      items.push({ label: "改分类（" + catName(n.category) + "）",
-        fn: () => pickGroupFor(n, r.querySelector(".mini.more")) });
+      items.push({ label: "项目设置…", fn: () => openProjSet(n) });
+    }
+    items.push({ label: "新增子环节", fn: () => {
+        /* 一次可以填一整批：`s001,s003A,s006-009`，也可以是序列模板
+           `WD####(12-20)`（几个 # 就是补零几位），弹窗里有实时预览 */
+        const prj = findProject(kind === "project" ? n.id : n.pid);
+        const label = kind === "project"
+          ? n.title
+          : ((prj ? prj.title : "项目") + " › " + n.title);
+        openNodesDialog(
+          kind === "project" ? n.id : n.pid,
+          kind === "project" ? null : n.id,
+          label
+        );
+      } });
+    /* 截止日期 / 备注 / 制作人：多选且这条被选上 → 菜单给候选、改一整批
+       （跟点行上那几处 .meta 一个待遇）；否则 prompt 改这一条。
+       项目那条「截止日期」已经进了设置页，这里只留环节的。 */
+    if (kind !== "project") {
+      items.push({ label: "编辑截止日期",
+        fn: () => editField(n, kind, "deadline", anchor) });
+    }
+    items.push({ label: "编辑备注", fn: () => editField(n, kind, "note", anchor) });
+    items.push({ label: n.artist ? "编辑制作人（" + n.artist + "）" : "编辑制作人",
+      fn: () => editField(n, kind, "artist", anchor) });
+    if (kind === "project") {
       items.push({ label: "登记款项", fn: async () => {
         /* 弹窗里的项目/客户/环节列表来自 finance_data，所以先取一次 */
         await loadFinance();
@@ -1286,8 +1353,19 @@ function bindRename(r, n, kind) {
           } });
     }
     items.push({ sep: true });
-    items.push({ label: "删除", dim: true, fn: async () => {
-      if (confirm("删除「" + n.title + "」" + (hasKids ? " 及其全部子环节" : "") + "？")) {
+    /* ⚠ 这里**不能**引用 `hasKids`：本函数是 bindRename(r, n, kind)，
+       `hasKids` 是隔壁 bindRowMenus() 的形参，在这个作用域里压根不存在
+       （早期是从那边整段搬过来的，变量名没跟着改）。
+       一引用就抛 ReferenceError，而 fn 是 async → 变成 rejected Promise，
+       又被 `d.onclick` 的裸调用吞掉（只写进 window.__err，界面上毫无提示）
+       → 表现就是「点删除没反应」（2026-10-10 用户报的）。
+       结构一律从 n 现算，别再依赖调用方传进来的标志。 */
+    const kidCount = (n.children && n.children.length) || 0;
+    items.push({ label: "删除", danger: true, fn: async () => {
+      /* danger = 红：跟「删除客户」一个待遇。以前这里是 dim（灰），
+         而 dim 的语义是"不可点的说明项"，用在最需要点的删除项上纯属误导
+         （用户 2026-10-10 看到灰色以为点不了 —— 巧的是那天它真的点不了）。 */
+      if (confirm("删除「" + n.title + "」" + (kidCount ? " 及其全部子环节" : "") + "？")) {
         await call("delete", kind, n.id); await reload();
       }
     } });
@@ -1296,14 +1374,8 @@ function bindRename(r, n, kind) {
 }
 
 /* ---------- 分类（分组） ----------
-   商业 / 个人这类顶层的筐现在是**库里的数据**（groups 表），可以新建、改名、删除。
-   键（g.key）是稳定标识，项目用 category 挂它 —— 所以改名不会动到任何项目。
-   代码里只保留两个兜底：找不到的键就显示成键本身（别显示空白）。 */
-const groupOf = (key) => (D && D.groups ? D.groups.find((g) => g.key === key) : null) || null;
-const catName = (key) => {
-  const g = groupOf(key);
-  return (g && g.name) || key || "未分类";
-};
+   商业 / 个人这类顶层的筐是**库里的数据**（groups 表），可以新建、改名、删除。
+   键（g.key）是稳定标识，项目用 category 挂它 —— 所以改名不会动到任何项目。 */
 
 /* 双击分类名就地改（跟项目 / 环节的标题一套手感）。
    分组行不带 draggable，所以不用像 bindRename 那样先摘掉拖拽。
@@ -1353,7 +1425,7 @@ function bindGroupMenu(r, g) {
           await reload();
       } },
       { sep: true },
-      { label: "删除这个分类", dim: true, fn: async () => {
+      { label: "删除这个分类", danger: true, fn: async () => {
           if (!confirm("删除分类「" + g.name + "」？\n\n" +
                        "里面还挂着项目的话删不掉，得先把项目挪到别的分类（或删掉）。")) return;
           const res = await call("group_delete", g.key);
@@ -1363,32 +1435,6 @@ function bindGroupMenu(r, g) {
     ];
     popup(items, r.querySelector(".mini.menu"));
   };
-}
-
-/* 某个项目「改分类」。在项目行 ⋯ 菜单里用。
-   顺带把「新建分类」放进来，并且建完**直接把这个项目挪过去** ——
-   十有八九就是为它建的。 */
-function pickGroupFor(n, anchor) {
-  const items = (D.groups || []).map((g) => ({
-    label: (g.key === n.category ? "✓ " : "　") + g.name,
-    fn: async () => {
-      if (g.key === n.category) return;
-      const res = await call("set_group", n.id, g.key);
-      if (!res || !res.ok) { alert((res && res.msg) || "没改成"); return; }
-      await reload();
-    },
-  }));
-  items.push({ sep: true });
-  items.push({ label: "新建分类…", fn: async () => {
-    const v = prompt("新分类叫什么？", "");
-    if (v === null || !v.trim()) return;
-    const res = await call("group_add", v.trim());
-    if (!res || !res.ok) { alert((res && res.msg) || "建不了分类"); return; }
-    const mv = await call("set_group", n.id, res.key);
-    if (!mv || !mv.ok) alert((mv && mv.msg) || "分类建好了，但项目没挪过去");
-    await reload();
-  } });
-  popup(items, anchor);
 }
 
 function renderFoot() {
@@ -1575,7 +1621,10 @@ async function applyStatus(ids, s, singleId, kind) {
    以前只有制作人有批量（而且是为它单独写的一套函数），
    2026-10-03 按用户的意思把截止日期和备注也接进来，于是收口成一份。 */
 
-/* 这四个字段的"人话"和取值约定。deadline 要校验格式，别的随便填。 */
+/* 这四个字段的"人话"和取值约定。deadline 要校验格式，别的随便填。
+   ⚠ `artist` 从 2026-10-16 起**不走 prompt 手输那条路了**：项目/环节的制作人
+   已经强关联到外包商名录，单条改走 pickArtist() 的选人菜单、批量改走
+   popupField() 的名录菜单，值一律是 vendors.id。`ask` 留着只为兜底。 */
 const FIELD_META = {
   artist:   { cn: "制作人",   ask: "制作人 / 谁在做（留空清除）", date: false },
   deadline: { cn: "截止日期", ask: "截止日期 YYYY-MM-DD（留空清除）", date: true },
@@ -1635,45 +1684,153 @@ function popupField(ids, field, anchorEl) {
   const apply = async (v) => {
     const done = await applyBulkField(ids, field, v);
     if (!done) return;
-    toast(v ? "已把 " + done + " 条的" + meta.cn + "改成「" + v + "」"
+    toast(v ? "已把 " + done + " 条的" + meta.cn + "改成「"
+               + (field === "artist" ? vendorName(v) : v) + "」"
              : "已清空 " + done + " 条的" + meta.cn);
   };
-  const items = fieldValues(field).map((v) => ({
-    label: v,
-    fn: () => apply(v),
-  }));
+  let items;
+  if (field === "artist") {
+    /* 制作人从**名录**里挑（2026-10-16 强关联后），值传 vendors.id。
+       「手输一个…」那条路撤掉了 —— 强关联之后不该再凭空造一个不在名录里的名字，
+       要新的人就去「新建一个外包商」。 */
+    items = (D.vendors || []).map((v) => ({
+      label: v.name + (v.kind === "团队" ? "（团队）" : ""),
+      fn: () => apply(v.id),
+    }));
+    if (!items.length) {
+      items.push({ label: "还没有外包商，先去「外包商」里建一个", dim: true });
+    }
+  } else {
+    items = fieldValues(field).map((v) => ({ label: v, fn: () => apply(v) }));
+  }
   items.push({ sep: true });
   items.push({ label: "清空" + meta.cn + "（" + n + " 条）", fn: () => apply("") });
-  items.push({
-    label: "手输一个…",
-    fn: () => {
-      const v = prompt("把这 " + n + " 条环节的" + meta.cn + "改成：", "");
-      if (v === null) return;                       // 取消（null）别往库里写空串
-      const s = String(v).trim();
-      /* 日期写歪了会让「逾期 N 天」整片失灵，这里挡一道 */
-      if (meta.date && s && !isDate(s)) { toast("日期要写成 YYYY-MM-DD，这次没改"); return; }
-      apply(s);
-    },
-  });
+  if (field !== "artist") {
+    /* 日期给**日历控件**（2026-10-16 用户要求），别的字段仍是 prompt 手输。
+       原来批量改日期也是 prompt 手打 YYYY-MM-DD，跟「编辑截止日期」一个毛病。 */
+    items.push(meta.date
+      ? { label: "选一个日期…",
+          fn: () => openDateDialog("node", ids, "",
+                                   "选一个日期，套给这 " + n + " 条环节") }
+      : { label: "手输一个…",
+          fn: () => {
+            const v = prompt("把这 " + n + " 条环节的" + meta.cn + "改成：", "");
+            if (v === null) return;                   // 取消（null）别往库里写空串
+            apply(String(v).trim());
+          } });
+  }
   popup(items, anchorEl);
+}
+
+/* ---- 日期选择弹窗（2026-10-16）----
+   环节 ⋯ 菜单的「编辑截止日期」（单条）与多选批量改日期，原来都是 prompt 手输；
+   用户要求给一个**日历选择控件** —— 两处统一走 #ovDate。
+   ⚠ 用原生 <input type="date">：它自带日历弹窗，而且根本输不进非法格式
+     （赋值非 ISO 串会被它自己丢掉），比 prompt + 事后 isDate() 校验可靠得多。
+   ⚠ 自绘占位（.dph）靠 syncDph / bindDph 维护 —— 跟新建页 / 设置页那四个日期框
+     是**同一套**，别再另写一份。 */
+let dateCtx = null;                                   // { kind, ids, bulk }
+
+/* ids 单条传 [id]、批量传一整批；kind 只在单条写库时用得上（批量固定走 node） */
+function openDateDialog(kind, ids, cur, subLabel) {
+  const list = (ids || []).slice();
+  if (!list.length) return;
+  dateCtx = { kind, ids: list, bulk: list.length > 1 };
+  $("#dateTitle").textContent = dateCtx.bulk
+    ? "改 " + list.length + " 个环节的截止日期" : "编辑截止日期";
+  $("#dateSub").textContent = subLabel || "";
+  $("#dateInput").value = cur || "";
+  syncDph($("#dateInput"));        // 回填是 JS 干的，不会触发 input 事件
+  $("#dateClear").style.display = cur ? "" : "none";  // 本来空着就没什么可清的
+  modal("#ovDate", true);
+  $("#dateInput").focus();
+}
+
+/* 空串 = 清掉日期（跟原来"留空清除"一个语义）。取消是另一条路，不走来这儿。 */
+async function saveDateDialog(value) {
+  if (!dateCtx) return;
+  const { kind, ids, bulk } = dateCtx;
+  const v = String(value || "").trim();
+  /* 走控件理论上写不出歪的，但手打键盘仍能敲 —— 挡一道，跟原来同一条口径 */
+  if (v && !isDate(v)) { toast("日期要写成 YYYY-MM-DD，这次没改"); return; }
+  if (bulk) {
+    await applyBulkField(ids, "deadline", v);         // 内部会 reload + toast
+  } else {
+    const r = await call("set_field", kind, ids[0], "deadline", v);
+    if (!r || !r.ok) { toast((r && r.msg) || "改失败"); return; }
+    await reload();
+  }
+  modal("#ovDate", false);
+  dateCtx = null;
+}
+
+function bindDateDialog() {
+  bindDph("#dateInput");
+  $("#dateOk").onclick = () => saveDateDialog($("#dateInput").value);
+  $("#dateCancel").onclick = () => { modal("#ovDate", false); dateCtx = null; };
+  $("#dateClear").onclick = () => saveDateDialog("");
 }
 
 /* 单条改（prompt）。取消返回 null，一个字都别写。 */
 async function editFieldOne(n, kind, field) {
   const meta = FIELD_META[field];
+  /* 日期走**日历控件**（2026-10-16 用户要求）：拿 prompt 手打 YYYY-MM-DD 太别扭。
+     副标题带上这条的名字，免得弹窗打开后不知道在改谁。 */
+  if (meta.date) {
+    openDateDialog(kind, [n.id], n[field] || "",
+                   (kind === "node" ? "环节：" : "项目：") + (n.title || ""));
+    return;
+  }
   const v = prompt(meta.ask, n[field] || "");
   if (v === null) return;
   const s = String(v).trim();
-  if (meta.date && s && !isDate(s)) { toast("日期要写成 YYYY-MM-DD，这次没改"); return; }
   await call("set_field", kind, n.id, field, s);
   await reload();
 }
 
 /* 行上点某个字段：批量还是单条，看这一条在不在选择集里（见 bulkIdsFor） */
 function editField(n, kind, field, anchorEl) {
+  /* 制作人走**选人菜单**（2026-10-16 强关联到外包商后），不再 prompt 手打名字 */
+  if (field === "artist") { pickArtist(n, kind, anchorEl); return; }
   const ids = bulkIdsFor(kind, n.id);
   if (ids) { popupField(ids, field, anchorEl); return; }
   editFieldOne(n, kind, field);
+}
+
+/* 单条改制作人：从外包商名录里挑。多选开着且这条被选上时自动转批量菜单
+   （跟别的字段同一套判断，别为它单写一份）。 */
+function pickArtist(n, kind, anchorEl) {
+  const ids = bulkIdsFor(kind, n.id);
+  if (ids) { popupField(ids, "artist", anchorEl); return; }
+  const items = (D.vendors || []).map((v) => ({
+    /* 当前那个打勾。⚠ 用全角空格占位对齐，别用普通空格（会被 HTML 折叠掉） */
+    label: (String(v.id) === String(n.artist_id) ? "✓ " : "　")
+           + v.name + (v.kind === "团队" ? "（团队）" : ""),
+    fn: () => setArtist(kind, n.id, v.id),
+  }));
+  if (!items.length) items.push({ label: "还没有外包商，先建一个…", dim: true });
+  items.push({ sep: true });
+  items.push({ label: "未分配（清空）", fn: () => setArtist(kind, n.id, 0) });
+  items.push({
+    label: "新建一个外包商…",
+    fn: async () => {
+      const name = prompt("新外包商的名字（个人姓名，或工作室 / 团队名）：", "");
+      if (name === null) return;                  // 取消
+      const s = name.trim();
+      if (!s) return;
+      const vid = await ensureVendor(s);
+      if (vid) await setArtist(kind, n.id, vid);
+    },
+  });
+  popup(items, anchorEl);
+}
+
+/* 给项目 / 环节挂上（或清掉）制作人。传 0 = 未分配 —— 后端 set_field 对
+   artist_id 会把 0 / "" 落成 NULL。 */
+async function setArtist(kind, oid, vid) {
+  const r = await call("set_field", kind, oid, "artist_id", vid || 0);
+  if (!r || !r.ok) { toast((r && r.msg) || "改失败"); return; }
+  await reload();
 }
 
 /* ---------- 多选批量的按钮绑定 ---------- */
@@ -1709,6 +1866,41 @@ function bindBulkBar() {
     if (!selCount()) { toast("先勾选要改的环节"); return; }
     popupField(Array.from(selNodes), "note", e.currentTarget);
   };
+  /* 批量删除（2026-10-10）。走 confirm 而不是自绘弹层：跟单条删除一个待遇，
+     但**必须说清删几条** —— 多选是级联选，勾一个父项就带走整棵子树，
+     用户心里的"3 条"和实际要删的"11 条"经常对不上。
+     真正删的条数由后端算（含被祖先带走的后代），所以确认框里报的是
+     **选中的根节点数**，删完的 toast 再报真实条数，两个数各有各的用处。 */
+  $("#bulkDel").onclick = async () => {
+    const n = selCount();
+    if (!n) { toast("先勾选要删的环节"); return; }
+    const kids = descendantsCountFor(Array.from(selNodes));
+    if (!confirm("删除选中的 " + n + " 个环节"
+        + (kids ? "，连同它们下面的 " + kids + " 个子环节" : "")
+        + "？\n\n删掉的环节和它们的目录链接都一起没了，不能撤销。")) return;
+    const r = await call("bulk_delete", Array.from(selNodes));
+    if (!r || r.ok === false) { toast((r && r.msg) || "删除失败"); return; }
+    selClear();                       // 删完清空选择集，别让批量条挂着幽灵计数
+    await reload();
+    selClear();                       // reload 会重建行，清完再清一次保险
+    repaintSelection();
+    syncBulkBar();
+    toast("已删除 " + r.done + " 个环节"
+      + (r.skipped ? "，跳过 " + r.skipped + " 个（已经不在了）" : ""));
+  };
+}
+
+/* 选中的这些环节，**除去它们自己**，下面一共还挂着多少子孙（去重）。
+   只为了在确认框里把话说全：「删除选中的 3 个环节，连同它们下面的 8 个子环节？」 */
+function descendantsCountFor(ids) {
+  const seen = new Set();
+  ids.forEach((id) => {
+    const n = findNode(Number(id));
+    if (!n) return;
+    descendantsOf(n).forEach((i) => seen.add(i));
+  });
+  ids.forEach((id) => seen.delete(Number(id)));   // 自己不算"子环节"
+  return seen.size;
 }
 
 /* ---------- 快捷键（M4） ---------- */
@@ -1743,12 +1935,43 @@ function bindHotkeys() {
 
 /* 客户框：可输入的组合框（input + datalist）。
    以前是个 <select>，库里没客户时就只有「（不指定）」一项 —— 等于客户填不了。
-   现在直接敲名字就行，库里没有的会在创建时自动建。 */
-function fillNewClients(keep) {
+   现在直接敲名字就行，库里没有的会在创建时自动建。
+   新建项目页和项目设置页共用同一个 datalist（一个 datalist 可以被多个 input 引用）。 */
+function fillClientOptions() {
   const list = D.clients || [];
   $("#clientOpts").innerHTML = list
     .map((c) => '<option value="' + esc(c.name) + '"></option>').join("");
+}
+function fillNewClients(keep) {
+  fillClientOptions();
   $("#newClient").value = keep ? String(keep) : "";
+}
+
+/* 外包商候选（datalist#vendorOpts）。项目设置页的「制作人」和「记一笔」的
+   外包商框共用这一份 —— datalist 是文档级的，填一次两处都生效。
+   排序交给后端（按名字），这里不重排，免得两边的顺序看着不一样。 */
+function fillVendorOptions() {
+  const el = $("#vendorOpts");
+  if (!el) return;
+  el.innerHTML = (D.vendors || [])
+    .map((v) => '<option value="' + esc(v.name) + '"></option>').join("");
+}
+
+/* 名字 → 外包商 id：名录里有就用现成的，没有就**建一个**。
+   跟后端 client_find_or_create 一个精神 —— 可输入的下拉框不该逼人先去建档。
+   ⚠ 建完就地补进 D.vendors 并重填候选，**不整个 reload()**：
+   那会把正在编辑的那个弹窗状态一起翻新，用户填了一半的东西就没了。 */
+async function ensureVendor(name) {
+  const n = String(name || "").trim();
+  if (!n) return 0;
+  const key = n.toLowerCase();
+  const hit = (D.vendors || []).find((v) => String(v.name).toLowerCase() === key);
+  if (hit) return hit.id;
+  const r = await call("vendor_save", 0, { name: n });
+  if (!r || !r.ok) { alert((r && r.msg) || "建外包商失败"); return 0; }
+  D.vendors = (D.vendors || []).concat([{ id: r.id, name: n, kind: "个人" }]);
+  fillVendorOptions();
+  return r.id;
 }
 
 /* 分类选择器按库里的分类现画（商业 / 个人 只是出厂值，用户能加能删能改名）。
@@ -1772,10 +1995,18 @@ function fillCatSeg() {
    做法：空值且未聚焦时把整段 mask 设成透明（style.css），用 .dph 自绘的
    YYYY/MM/DD 顶上 —— 所以 CSS 得知道"现在有没有值"，这就是 .hav 的用途。
    ⚠ 纯 CSS 判不出来：date 框不支持 :placeholder-shown，`:valid` 对空值也成立。
-   有值时不能透明（原生画的 2026/12/31 正是要的格式），聚焦时也不能（用户正打字）。 */
-function syncDl() {
-  const el = $("#newDl");
+   有值时不能透明（原生画的 2026/12/31 正是要的格式），聚焦时也不能（用户正打字）。
+   2026-10-13 起按 `.dwrap` 泛化：新建页 + 设置页一共四个日期框共用这一套。 */
+function syncDph(el) {
   if (el) el.classList.toggle("hav", !!el.value);
+}
+/* 给一个 date 框挂上"值变了就更新自绘占位"。打开弹窗时还要显式 syncDph 一次
+   （清空 / 回填是 JS 干的，不会触发 input 事件）。 */
+function bindDph(sel) {
+  const el = $(sel);
+  if (!el) return;
+  el.addEventListener("input", () => syncDph(el));
+  el.addEventListener("change", () => syncDph(el));
 }
 
 function openNewDialog(defaultCat) {
@@ -1785,10 +2016,13 @@ function openNewDialog(defaultCat) {
   $("#newTitle").value = "";
   $("#newPath").value = "";
   $("#newDl").value = "";
-  syncDl();                    // 清空后要把自绘占位放回来
+  $("#newSettle").value = "";
+  syncDph($("#newDl"));        // 清空后要把自绘占位放回来
+  syncDph($("#newSettle"));    // 同理 —— 上一个项目填的结款日期不能留到下一个
   $("#newAmount").value = "";
   $("#newPaid").value = "";
   $("#newTax").value = "";
+  syncNewNet();                // 表单清空后，税后提示也得跟着清掉
   $("#newPaidDate").value = isoOf(new Date());
   modal("#ovNew", true);
   $("#newTitle").focus();
@@ -1809,14 +2043,21 @@ function bindNew() {
   };
   $("#newCancel").onclick = () => modal("#ovNew", false);
   /* 选完日期 / 清空日期后，自绘占位要跟着让位 / 回来（原生 date 框有值时不能透明） */
-  $("#newDl").addEventListener("input", syncDl);
-  $("#newDl").addEventListener("change", syncDl);
+  bindDph("#newDl");
+  bindDph("#newSettle");
+  /* 金额 / 税率任一改动都重算「税后」提示（只影响显示，不进存储口径）。
+     用 oninput = 而不是 addEventListener：重复进这个绑定函数也不会叠好几份。 */
+  $("#newAmount").oninput = syncNewNet;
+  $("#newTax").oninput = syncNewNet;
   $("#newOk").onclick = async () => {
     const t = $("#newTitle").value.trim();
     if (!t) { $("#newTitle").focus(); return; }
     /* 截止日期是原生 date 框：value 只可能是空串或 ISO，不用归一、也不会写错
-       （塞非 ISO 进去它自己就丢掉）。框里那个 YYYY/MM/DD 是自绘占位，见 syncDl()。 */
+       （塞非 ISO 进去它自己就丢掉）。框里那个 YYYY/MM/DD 是自绘占位，见 bindDph。 */
     const dl = $("#newDl").value;
+    /* 结款日期同样只在有值时提交 —— 空串写进 settle_date 会让「没填」和
+       "填了个空的"两种状态混在一起，后端 settle_gap 判空要额外绕一圈 */
+    const sd = $("#newSettle").value;
     /* 款项一起提交：金额校验在 Python 侧做，填错就整体不建项目，
        免得留下一个「以为记上了其实没记」的空项目 */
     const money = {
@@ -1832,9 +2073,142 @@ function bindNew() {
                            $("#newPath").value.trim(), money);
     if (!res.ok) { alert(res.msg || "创建失败"); return; }
     if (dl) await call("set_field", "project", res.id, "deadline", dl);
+    if (sd) await call("set_field", "project", res.id, "settle_date", sd);
     modal("#ovNew", false);
     await reload();
   };
+}
+
+/* ---------- 项目设置 ----------
+   ⋯ 菜单里原本散着「编辑截止日期 / 改客户 / 改分类」，一次只能改一样；名称更惨，
+   只能双击标题。现在合成这一页：改完点一次「保存」，逐个下发到原来那些 API
+   （rename / set_group / set_client / set_field / add_link）——
+   **不新开后端入口**，每条改法还是全工程唯一那一份，冒烟也就能照旧钉住。
+   金额不在这一页：那是「登记款项」的事。 */
+
+/* 设置页里选中的分类键。跟新建页那个 `cat` **分开存** —— 共用一个变量的话，
+   在设置页选了分类、再开新建页，会带着上一个项目的分类。 */
+let psCat = "";
+/* 当前正在编辑的项目对象（打开时存，保存时对照"哪些真的改了"）。 */
+let psNode = null;
+
+function fillPsCatSeg() {
+  const seg = $("#psSegCat");
+  const gs = (D && D.groups) || [];
+  if (!gs.some((g) => g.key === psCat)) psCat = gs.length ? gs[0].key : "";
+  seg.innerHTML = gs.map((g) =>
+    '<button data-c="' + esc(g.key) + '"' + (g.key === psCat ? ' class="act"' : "") +
+    ">" + esc(g.name) + "</button>").join("");
+}
+
+/* 项目根目录 = links 里 label 恰好是「项目根目录」的那条（新建项目就是这么存的）。
+   一个项目可以有多条目录链接（用户能自己加），设置页只管这一条，
+   别的照旧在行上那个目录菜单里增删。 */
+const rootLinkOf = (n) =>
+  (n.links || []).find((l) => l.label === "项目根目录") || null;
+
+function openProjSet(n) {
+  psNode = n;
+  $("#psTitle").value = n.title || "";
+  psCat = n.category || "";
+  fillPsCatSeg();
+  fillClientOptions();          // 客户候选跟新建页共用 #clientOpts
+  $("#psClient").value = n.client ? String(n.client) : "";
+  /* 制作人（2026-10-16）：候选是外包商名录，框里放的是**名字**（库里存的是 id） */
+  fillVendorOptions();
+  $("#psArtist").value = n.artist || "";
+  $("#psDl").value = n.deadline || "";
+  $("#psSettle").value = n.settle_date || "";
+  const rl = rootLinkOf(n);
+  $("#psPath").value = (rl && rl.path) || "";
+  syncDph($("#psDl"));          // 回填是 JS 干的，不会触发 input 事件
+  syncDph($("#psSettle"));
+  modal("#ovPrjSet", true);
+  $("#psTitle").focus();
+}
+
+async function saveProjSet() {
+  const n = psNode;
+  if (!n) return;
+  const id = n.id;
+  const title = $("#psTitle").value.trim();
+  if (!title) { $("#psTitle").focus(); return; }
+  const client = $("#psClient").value.trim();
+  const artist = $("#psArtist").value.trim();
+  const dl = $("#psDl").value;
+  const sd = $("#psSettle").value;
+  const path = $("#psPath").value.trim();
+  const rl = rootLinkOf(n);
+  const oldPath = (rl && rl.path) || "";
+
+  /* 只把**真的改了**的字段发下去：既省跨桥往返，也免得「打开设置页点保存」
+     这种空操作去动一遍 last_activity_at（那是活跃度的输入）。 */
+  const jobs = [];
+  if (title !== (n.title || "")) {
+    jobs.push(() => call("rename", "project", id, title));
+  }
+  if (psCat && psCat !== n.category) {
+    jobs.push(() => call("set_group", id, psCat));
+  }
+  /* 客户：留空 = 摘掉客户；名字没变就不发（set_client 会拿名字去建新客户） */
+  if (client !== (n.client || "")) {
+    jobs.push(() => call("set_client", id, client));
+  }
+  if (dl !== (n.deadline || "")) {
+    jobs.push(() => call("set_field", "project", id, "deadline", dl));
+  }
+  /* 制作人（2026-10-16 强关联）：框里是**名字**，库里存的是 vendors.id，
+     所以要先把名字换成 id —— 不在名录里就现建一条（跟客户框一个待遇）。
+     留空 = 未分配（后端把 0 落成 NULL）。 */
+  if (artist !== (n.artist || "")) {
+    jobs.push(async () => {
+      if (!artist) return call("set_field", "project", id, "artist_id", 0);
+      const vid = await ensureVendor(artist);
+      if (!vid) return { ok: false, msg: "制作人没能保存（建条目失败）" };
+      return call("set_field", "project", id, "artist_id", vid);
+    });
+  }
+  if (sd !== (n.settle_date || "")) {
+    jobs.push(() => call("set_field", "project", id, "settle_date", sd));
+  }
+  /* 目录链接：add_link 只有 INSERT 没有 upsert（跟新建页一样），
+     换路径 = 删旧条 + 建新条，顺序不能倒。 */
+  if (path !== oldPath) {
+    jobs.push(async () => {
+      if (rl) {
+        const d = await call("delete_link", rl.id);
+        if (d && d.ok === false) return d;
+      }
+      return path ? call("add_link", "project", id, "项目根目录", path) : { ok: true };
+    });
+  }
+
+  for (const job of jobs) {
+    const res = await job();
+    /* 失败就停下并说清原因 —— 静默失败在这里最要命：用户以为改好了 */
+    if (res && res.ok === false) { alert(res.msg || "保存失败"); return; }
+  }
+  modal("#ovPrjSet", false);
+  await reload();
+}
+
+function bindProjSet() {
+  bindDph("#psDl");
+  bindDph("#psSettle");
+  $("#psSegCat").onclick = (e) => {
+    const b = e.target.closest("button[data-c]");
+    if (!b) return;
+    $$("#psSegCat button").forEach((x) => x.classList.remove("act"));
+    b.classList.add("act");
+    psCat = b.dataset.c;
+  };
+  $("#psPick").onclick = async () => {
+    const res = await call("pick_dir");
+    if (!res || !res.ok) { alert((res && res.msg) || "打不开选择窗口"); return; }
+    if (res.path) $("#psPath").value = res.path;
+  };
+  $("#psCancel").onclick = () => modal("#ovPrjSet", false);
+  $("#psOk").onclick = saveProjSet;
 }
 
 /* ---------- 批量新增子环节 ---------- */
@@ -1930,26 +2304,6 @@ function bindNodes() {
     toast("已创建 " + res.count + " 个环节" + (sk ? "，跳过 " + sk + " 个已存在的" : ""));
     await reload();
   };
-}
-
-/* 项目行菜单：选客户（可现场新建） */
-function pickClientFor(n, anchor) {
-  const items = (D.clients || []).map((c) => ({
-    label: c.name + (c.id === n.client_id ? "　✓" : ""),
-    fn: async () => { await call("set_client", n.id, c.id); await reload(); },
-  }));
-  if (!items.length) items.push({ label: "（还没有客户，往下新建）", dim: true, fn: () => {} });
-  if (n.client_id) items.push({ label: "不挂客户", dim: true,
-    fn: async () => { await call("set_client", n.id, 0); await reload(); } });
-  items.push({ sep: true });
-  items.push({ label: "新建客户…", fn: async () => {
-    const v = prompt("客户名", n.client || "");
-    if (v === null || !v.trim()) return;
-    const r = await call("set_client", n.id, v.trim());
-    if (r && r.ok === false) { alert(r.msg || "设置失败"); return; }
-    await reload();
-  } });
-  popup(items, anchor);
 }
 
 /* ---------- 设置 ---------- */
@@ -2264,10 +2618,14 @@ async function submitCheckin(sel, done) {
     kind: "project", id: parseInt(i.dataset.id, 10),
     title: i.parentElement.querySelector("span").textContent,
   }));
-  if (picked.length) {
-    await call("checkin", picked);
-    for (const p of picked) await call("set_field", "project", p.id, "priority", 1);
-  }
+  /* 空勾选也**必须**发这一枪。后端 checkin() 会给空列表补一条
+     「打卡（未勾选项目）」的空流水（weight=0，不污染热力图），
+     代表"今天确认过了"，提醒线程当天就不再催。
+     以前这里有个 `if (picked.length)` 守卫 —— 空勾选点「确认打卡」等于
+     什么都没发生：弹窗关了、今天照样被催，看着像程序坏了（用户 2026-10-09 报的）。
+     「今日必做」的重置也在后端一并做（清 0 旧的 + 置 1 本次的），
+     顺带省掉 N 次桥接往返。 */
+  await call("checkin", picked);
   done();
   await reload();
 }
@@ -2501,6 +2859,42 @@ function money(v, ccy) {
   return s + n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/* ---- 税后金额提示（纯显示，不碰任何存储 / 汇总口径） ----
+
+   税率本身是**登记字段**，不参与计算（2026-10-13 实测确认）。但填了税率就想
+   顺手看见税后金额，所以这里只做显示上的换算：
+       不含税 = 含税 ÷ (1 + 税率%)
+   换算结果**不写库、不进汇总**，只在输入框后面挂一句提示。 */
+
+/* 把输入框里的文本读成数字：空 / 非数字 → null。
+   ⚠ 不能返回 0 —— 0 是"真的有值"，会让「没填」和「填了 0」混成一件事。 */
+function numOf(s) {
+  const x = String(s == null ? "" : s)
+    .replace(/[,\s，]/g, "").replace(/元$/, "").trim();
+  if (!x) return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+
+/* 税后金额的提示文本；金额或税率没填 / 填错 → 空串（提示就成了一个空 span，不显示） */
+function taxNetText(amountText, taxText) {
+  const a = numOf(amountText);
+  const t = numOf(String(taxText == null ? "" : taxText).replace(/[%％]/g, ""));
+  if (a === null || t === null) return "";
+  if (!(t > -100)) return "";            // 税率 ≤ -100% 会把除数变成 0 或负数
+  const net = a / (1 + t / 100);
+  if (!Number.isFinite(net)) return "";
+  return "（税后 " + net.toLocaleString(
+    "zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " 元）";
+}
+
+function syncNewNet() {
+  $("#newNet").textContent = taxNetText($("#newAmount").value, $("#newTax").value);
+}
+function syncFinNet() {
+  $("#finNet").textContent = taxNetText($("#finAmount").value, $("#finTax").value);
+}
+
 /* 项目下拉：带分类前缀，方便区分商业 / 个人 */
 function allProjects() {
   const out = [];
@@ -2519,6 +2913,21 @@ function nodeOptions(projectId) {
   });
   walk(prj.children, 0);
   return out;
+}
+
+/* 财务页四组数据的标签页（2026-10-16 用户要求：省纵向空间）。
+   顺序就是用户定的：项目款项（默认）/ 客户汇总 / 外包商汇总 / 应收账龄（放最后）。
+   ⚠ 切 tab 只改显隐、**不重渲染** —— 表早就画好了，重画纯属浪费。
+   ⚠ finTab 是模块变量，`loadFinance()` / `renderFinance()` 都不碰它 ——
+     所以切年份 / 切客户后，用户还停在原来那一页，不会被弹回「项目款项」。 */
+let finTab = "prj";
+const FIN_PANES = [["prj", "#fsPrj"], ["cli", "#fsCli"], ["vdr", "#fsVdr"], ["age", "#fsAge"]];
+function syncFinTabs() {
+  $$("#finTabs button").forEach((b) => b.classList.toggle("act", b.dataset.t === finTab));
+  FIN_PANES.forEach(([k, sel]) => {
+    const el = $(sel);
+    if (el) el.style.display = (k === finTab) ? "" : "none";
+  });
 }
 
 async function loadFinance() {
@@ -2590,10 +2999,20 @@ function renderFinance() {
     const body = f.projects.map((p) => {
       const open = !!finExpanded[p.project_id];
       const pend = p.pending > 0.009;
+      /* 结清的标记分两种（2026-10-16 加核销后）：收齐了 vs 核销掉的。
+         用户的原话是"确定无法收齐款项，但项目还是要做一个结束处理" ——
+         两者都算收尾，但账上得能看出是哪种。 */
+      const tag = p.settled
+        ? '<span class="tag" style="color:var(--green);border-color:var(--green)">'
+          + (p.writeoff > 0 ? "已核销结清" : "已结清") + "</span>"
+        : (p.writeoff > 0
+          ? '<span class="tag" style="color:var(--amber);border-color:var(--amber)">已核销 '
+            + money(p.writeoff) + "</span>"
+          : "");
       const rows = '<div class="ftrow body" data-pid="' + p.project_id + '">' +
         '<div class="nm">' + esc(p.project) +
           (p.node_records ? '<span class="tag">含 ' + p.node_records + " 笔环节款</span>" : "") +
-          (p.settled ? '<span class="tag" style="color:var(--green);border-color:var(--green)">已结清</span>' : "") +
+          tag +
         "</div>" +
         '<div class="nm">' + esc(p.client || "—") + "</div>" +
         '<div class="num">' + money(p.contract) + "</div>" +
@@ -2668,7 +3087,29 @@ function renderFinance() {
         '<div class="num">' + c2.rate + "%</div><div></div></div>").join("")
     : '<div class="empty">还没有客户数据</div>';
 
-  $("#finTip").textContent = "待收 = 合同额 − 已收；实际收入 = 已收 − 外包支出。" +
+  /* 外包商汇总（口径：已付 + 应付欠款，用户 2026-10-16 定的）。
+     ⚠ 只吃「外包支出」且非「作废」的明细 —— 后端 _by_vendor 就是这个口径，
+     这里一律照它发来的数直出，不在前端重算（两处各算一遍迟早不一致）。
+     vendor_id=0 那条是「未指定外包商」，是历史遗留，得留着让人看得见。 */
+  const vs = f.vendor_summary || [];
+  $("#finVendorSum").innerHTML = vs.length
+    ? '<div class="ftrow head" style="grid-template-columns:1.5fr .7fr .7fr .9fr .9fr .9fr .6fr .9fr">' +
+      "<div>外包商</div><div>类型</div><div>项目数</div>" +
+      '<div class="num">已付</div><div class="num">应付</div><div class="num">合计</div>' +
+      '<div class="num">笔数</div><div class="num">最近一笔</div></div>' +
+      vs.map((v) =>
+        '<div class="ftrow body" style="cursor:default;grid-template-columns:1.5fr .7fr .7fr .9fr .9fr .9fr .6fr .9fr">' +
+        '<div class="nm">' + esc(v.vendor) + "</div>" +
+        '<div class="nm" style="color:var(--dim)">' + esc(v.kind || "—") + "</div>" +
+        '<div class="num">' + v.projects + "</div>" +
+        '<div class="num ' + (v.paid ? "recv" : "zero") + '">' + money(v.paid) + "</div>" +
+        '<div class="num ' + (v.pending > 0.009 ? "pend" : "zero") + '">' + money(v.pending) + "</div>" +
+        '<div class="num">' + money(v.total) + "</div>" +
+        '<div class="num">' + v.count + "</div>" +
+        '<div class="num">' + esc(v.last_date || "—") + "</div></div>").join("")
+    : '<div class="empty">还没有外包支出</div>';
+
+  $("#finTip").textContent = "待收 = 合同额 − 已收 − 已核销；实际收入 = 已收 − 外包支出。" +
     " 开票金额只在导出的表格里，看板不展示。" +
     (f.other_currency ? " 另有 " + f.other_currency + " 笔非 " + finCcy + " 记录未计入当前视图。" : "") +
     " 导出目录：" + (f.setting_export_dir || "（首次导出时自动创建）");
@@ -2688,6 +3129,17 @@ function fillFinNode(pid, keep) {
   sel.innerHTML = '<option value="">项目整体</option>' +
     nodeOptions(pid).map((n) => '<option value="' + n.id + '">' + esc(n.label) + "</option>").join("");
   sel.value = keep ? String(keep) : "";
+}
+
+/* 按款项类型显隐「跟类型绑在一起」的那几行：发票号 / 外包商 / 结款按钮。
+   ⚠ 只写一份 —— 原来"打开弹窗"和"切换类型"两处各写了一遍，2026-10-16 加
+   外包商行时必然漏掉一处，而那种漏法的表现是"刚打开正常、切一下类型就少一行"，
+   最难查。 */
+function syncFinKindRows(kind) {
+  $("#finInvRow").style.display = kind === "invoice" ? "flex" : "none";
+  $("#finVendorRow").style.display = kind === "outsource" ? "flex" : "none";
+  /* 结款只跟「到账」有关（合同额 ← 已收到账累计），别的类型不露头 */
+  $("#finPayoffRow").style.display = kind === "payment" ? "flex" : "none";
 }
 
 /* presetProject：从项目行 ⋯ 进来时预选该项目，省得再挑一遍 */
@@ -2717,9 +3169,100 @@ function openFinDialog(rec, presetProject) {
   $("#finDate").value = rec ? rec.date : isoOf(new Date());
   $("#finInvNo").value = rec ? rec.invoice_no : "";
   $("#finNote").value = rec ? rec.note : "";
+  /* 外包商（2026-10-16）：候选来自名录，框里放**名字**（库里存 id）。
+     ⚠ 编辑老外包支出时这里是空的（升级前没记人），保存会被后端要求补填 ——
+     用户已经知道并接受了这个代价。 */
+  fillVendorOptions();
+  $("#finVendor").value = rec ? (rec.vendor || "") : "";
   $("#finDel").style.display = rec ? "block" : "none";
-  $("#finInvRow").style.display = kind === "invoice" ? "flex" : "none";
+  syncFinKindRows(kind);
+  /* 税后提示要按回填进来的金额 / 税率重算一次
+     （弹窗是复用的，上一次打开留下的提示不能赖着不走） */
+  syncFinNet();
   modal("#ovFin", true);
+}
+
+/* ---- 结款：把收不齐的待收核销掉（合同额一条不动） ----
+   2026-10-16 改。旧做法是"把合同额改成实收、多余的合同额记录合并删除"，
+   它把**损失从账面上抹掉了**：合同 15 万、实收 12 万，结完款账上变成
+   "合同额 12 万、收款率 100%"，那 3 万去哪了查不到。
+   现在：合同额一条不动（签了多少就是多少），差额由一条「核销」记录承担，
+   收款率因此是 15 万里收回 12 万 = 80%。见 DESIGN.md §4.5。 */
+
+/* 自绘确认弹层 → Promise<boolean>。
+   ⚠ 不用 window.confirm：它会卡住 JS 线程（diag.js 里记过这个坑），
+   而且这里要把到账记录一条条列出来，原生弹窗也做不到。 */
+function modalAsk(id, okSel, cancelSel) {
+  return new Promise((res) => {
+    const done = (v) => { modal(id, false); res(v); };
+    $(okSel).onclick = () => done(true);
+    $(cancelSel).onclick = () => done(false);
+    modal(id, true);
+  });
+}
+
+async function openPayoff() {
+  const pid = parseInt($("#finPrj").value, 10);
+  if (!pid) { alert("先选一个项目"); return; }
+  const r = await call("finance_payoff_preview", pid);
+  if (!r.ok) { alert(r.msg || "算不出来"); return; }
+
+  /* 一笔「已收」都没有时，结款会把整份合同一次性核销掉 —— 那不是"结款"，
+     是把数据改坏。真要记走手动（自己写清原因），别让一颗按钮默默干这事。 */
+  if (!(r.received > 0)) {
+    alert("这个项目还没有「已收」的到账记录，结款会把合同额 " + money(r.contract)
+      + " 整份核销掉。\n先记一笔到账再来；如果确实是整份收不回，"
+      + "请手动记一笔「核销」并写清原因。");
+    return;
+  }
+
+  /* 账摊开写：合同额 − 已收 − 手记核销 = 待收，结款就是把「核销」补到刚好盖住它 */
+  const manual = r.writeoff_manual || 0;
+  const auto = r.writeoff_auto || 0;
+  const should = Math.max(0, (r.target || 0) - manual);   // 结款这条该是多少
+  $("#payHead").textContent = "合同额 " + money(r.contract)
+    + " − 已收 " + money(r.received)
+    + (manual > 0 ? " − 手记核销 " + money(manual) : "")
+    + " = 待收 " + money(r.pending) + "。";
+
+  /* 已经平了就直说 —— 别开个"确认"让人点完发现什么都没发生 */
+  if (Math.abs(should - auto) < 0.01) {
+    alert("这个项目已经结清了，没有待收要核销。");
+    return;
+  }
+
+  const ps = r.payments || [];
+  $("#payList").innerHTML = ps.length
+    ? ps.map((x) => "<div>" + esc(x.date || "无日期") + " · " + money(x.amount)
+        + " · " + esc(x.status || "")
+        + (x.counted ? " ✓ 计入" : " ✗ 不计入")
+        + (x.node ? " · 挂到 " + esc(x.node) : "")
+        + (x.note ? " · " + esc(x.note) : "") + "</div>").join("")
+    : "<div>这个项目还没有任何到账记录</div>";
+
+  /* 合同额记录会怎么落，事先说清楚 —— 现在**一条都不动**，而且能看出来 */
+  const c = (r.counts || {}).contracts || 0;
+  const rate = r.contract ? Math.round(r.received / r.contract * 1000) / 10 : 0;
+  $("#payFoot").textContent = (should > 0
+    ? (auto > 0
+      ? "结款后「结款核销」从 " + money(auto) + " 改为 " + money(should) + "。"
+      : "结款后新增一条「核销」记录 " + money(should) + "（备注：结款核销）。")
+    : "结款后把「结款核销」作废 —— 这个项目已经不需要核销了。")
+    + " 合同额仍是 " + money(r.contract) + "（不动），收款率 "
+    + rate + "%。"
+    + (c ? "该项目现有 " + c + " 条合同额记录，一条都不会被改动。" : "");
+
+  if (!(await modalAsk("#ovPayoff", "#payOk", "#payCancel"))) return;
+
+  const a = await call("finance_payoff_apply", pid);
+  if (!a.ok) { alert(a.msg || "结款失败"); return; }
+  toast(a.changed === false ? (a.msg || "已经结清了")
+    : (a.cleared
+      ? "已结款：撤掉核销记录，待收恢复"
+      : "已结款：核销 " + money(a.writeoff_new) + "，待收归零"
+        + "（合同额仍是 " + money(a.contract) + "）"));
+  modal("#ovFin", false);
+  await loadFinance();
 }
 
 /* ---------- 导出（选项弹窗 + 系统另存为） ----------
@@ -2736,11 +3279,12 @@ const EX_SECS = [
   ["records", "款项明细"],
   ["projects", "项目汇总"],
   ["clients", "客户汇总"],
+  ["vendors", "外包商汇总"],
   ["aging", "应收账龄"],
 ];
 
 let exFmt = "xlsx";
-let exSecs = EX_SECS.map((s) => s[0]);   // 默认四项全要（= 老行为）
+let exSecs = EX_SECS.map((s) => s[0]);   // 默认全要（= 老行为 + 外包商汇总）
 let exSeq = 0;                           // 预览请求序号，见 refreshEx()
 
 /* 界面上的选项 → 交给后端的 opts，键名与 finance.norm_opts 对齐 */
@@ -2896,6 +3440,13 @@ function bindExport() {
 
 function bindFinance() {
   $("#finAdd").onclick = () => openFinDialog(null);
+  /* 四组数据的标签页（2026-10-16） */
+  $("#finTabs").onclick = (e) => {
+    const b = e.target.closest("button[data-t]");
+    if (!b) return;
+    finTab = b.dataset.t;
+    syncFinTabs();
+  };
   $("#finCancel").onclick = () => modal("#ovFin", false);
   /* 每次开面板都先回到「新建」态：editCli 归零、表单清空。
      不然上次编辑过某个客户后关掉再打开，表单里还留着上一个人的资料，
@@ -2904,6 +3455,13 @@ function bindFinance() {
     window.__cliEdit(0);
     renderClients();
     modal("#ovCli", true);
+  };
+  /* 外包商跟客户摆一块（财务页头两颗按钮并排）：两个都是"名录"，
+     都要从这儿建档，记账时都要选。 */
+  $("#finVendorsBtn").onclick = () => {
+    window.__vdrEdit(0);
+    renderVendors();
+    modal("#ovVendor", true);
   };
 
   /* 导出收进一个下拉菜单。以前是三个导出按钮 + 一个「导出目录」横排、占掉半条
@@ -2929,12 +3487,25 @@ function bindFinance() {
     const k = b.dataset.k;
     $$("#finKind button").forEach((x) => x.classList.toggle("act", x.dataset.k === k));
     fillFinStatus(k, "");
-    $("#finInvRow").style.display = k === "invoice" ? "flex" : "none";
+    syncFinKindRows(k);
   };
   $("#finPrj").onchange = () => fillFinNode(parseInt($("#finPrj").value, 10), null);
+  /* 金额 / 税率改动 → 重算税后提示（只影响显示，不进存储口径） */
+  $("#finAmount").oninput = syncFinNet;
+  $("#finTax").oninput = syncFinNet;
+  $("#finPayoff").onclick = openPayoff;
 
   $("#finOk").onclick = async () => {
     const kind = ($("#finKind button.act") || {}).dataset?.k || "payment";
+    /* 外包商（2026-10-16）：框里是**名字**，要换成 id 才发下去。
+       「外包支出」必填 —— 后端也会拦，但在这儿先拦能少一趟往返、提示也更直接。 */
+    let vendorId = 0;
+    if (kind === "outsource") {
+      const vn = $("#finVendor").value.trim();
+      if (!vn) { toast("「外包支出」要选一个外包商"); $("#finVendor").focus(); return; }
+      vendorId = await ensureVendor(vn);
+      if (!vendorId) return;                       // ensureVendor 已经把原因弹出来了
+    }
     const payload = {
       kind,
       project_id: parseInt($("#finPrj").value, 10),
@@ -2946,6 +3517,8 @@ function bindFinance() {
       status: $("#finStatus").value,
       invoice_no: $("#finInvNo").value.trim(),
       note: $("#finNote").value.trim(),
+      /* 非外包支出传 0：后端会按类型把它落成 NULL，不会挂错人 */
+      vendor_id: vendorId,
     };
     const r = finEditId
       ? await call("finance_update", finEditId, payload)
@@ -3007,6 +3580,99 @@ function bindFinance() {
     await loadFinance();
     renderClients();
   };
+
+  /* ---- 外包商 / 制作人名录 ----
+     跟客户并排、同一套形态（名录 + 唯一名 + 删除保护），所以代码也搁在一处。
+     ⚠ 它比客户多一个身份：同一条记录既是项目 / 环节的**制作人**，
+     也是财务「外包支出」的收款方 —— 改个名字两处都得跟着变，
+     所以存完除了本页，还要 reload() 一次让项目树和候选框同步。 */
+  let editVdr = 0;
+  window.__vdrEdit = (id) => {
+    const v = (fin.vendors || []).find((x) => x.id === id);
+    editVdr = v ? v.id : 0;
+    $("#vdrName").value = v ? v.name : "";
+    $("#vdrContact").value = v ? v.contact : "";
+    $("#vdrNote").value = v ? v.note : "";
+    /* 类型没有第三档（后端也只认这两档）。存进来的野值按「个人」渲染，
+       免得两个按钮都不亮、看着像没选。 */
+    const k = v && v.kind === "团队" ? "团队" : "个人";
+    $$("#vdrKind button").forEach((b) => b.classList.toggle("act", b.dataset.k === k));
+    $("#vdrSave").textContent = v ? "更新外包商" : "保存外包商";
+  };
+  /* 删外包商：入口在列表行的 ⋯ 菜单里（同客户，点哪行删哪行）。
+     ⚠ 后端会盯三处牵连 —— 项目 / 环节的制作人、还有记在他名下的外包支出 ——
+     拒绝原因必须原样带出来（含具体几条），别吞成泛泛的"删除失败"。 */
+  window.__vdrDel = async (id) => {
+    const v = (fin.vendors || []).find((x) => x.id === id);
+    const name = v ? v.name : "这个外包商";
+    if (!confirm("删除外包商「" + name + "」？\n\n已经记过的款项和项目都不会被删。\n"
+                 + "如果还有项目 / 环节的制作人是他，或者还有外包支出记在他名下，\n"
+                 + "会先让你把这些改掉。")) return;
+    const r = await call("vendor_delete", id);
+    if (!r.ok) { alert(r.msg || "删除失败"); return; }
+    if (editVdr === id) window.__vdrEdit(0);   // 表单里正编着它 → 清掉
+    await loadFinance();
+    await reload();                            // 树上的制作人可能少了名字
+    fillVendorOptions();
+    renderVendors();
+  };
+  $("#vdrKind").onclick = (e) => {
+    const b = e.target.closest("button[data-k]");
+    if (!b) return;
+    $$("#vdrKind button").forEach((x) => x.classList.toggle("act", x === b));
+  };
+  $("#vdrReset").onclick = () => window.__vdrEdit(0);
+  $("#vdrClose").onclick = () => modal("#ovVendor", false);
+  $("#vdrSave").onclick = async () => {
+    const payload = {
+      name: $("#vdrName").value.trim(),
+      kind: ($("#vdrKind button.act") || {}).dataset?.k || "个人",
+      contact: $("#vdrContact").value.trim(),
+      note: $("#vdrNote").value.trim(),
+    };
+    if (!payload.name) { $("#vdrName").focus(); return; }
+    const r = await call("vendor_save", editVdr, payload);
+    if (!r.ok) { alert(r.msg || "保存失败"); return; }
+    window.__vdrEdit(0);
+    await loadFinance();
+    await reload();
+    fillVendorOptions();
+    renderVendors();
+  };
+}
+
+/* 挂靠摘要：**只显示挂靠项目数**（2026-10-16 用户要求精简，原来还带「N 环节 · K 笔款」）。
+   ⚠ 显示精简了，删除保护并没有松 —— 后端 vendor_delete 仍然盯项目 / 环节 / 款项三处，
+   有环节或款项挂着照样删不掉、照样把原因说出来。所以这里空着（「—」）只代表
+   "没有项目挂他"，不代表这条能删；真要确认能不能删，点 ⋯ → 删除，后端会回答。 */
+function hangLabel(v) {
+  return v.projects ? v.projects + " 项目" : "—";
+}
+
+function renderVendors() {
+  if (!fin) return;
+  const list = fin.vendors || [];
+  const cols = "grid-template-columns:1.3fr .7fr 1.5fr 22px";
+  $("#vdrList").innerHTML = list.length
+    ? '<div class="ftrow head" style="' + cols + '">' +
+      "<div>外包商</div><div>类型</div><div>挂靠</div><div></div></div>" +
+      list.map((v) =>
+        '<div class="ftrow body" style="' + cols + '">' +
+        '<div class="nm">' + esc(v.name) + "</div>" +
+        '<div class="nm">' + esc(v.kind || "个人") + "</div>" +
+        '<div class="nm" style="color:var(--dim)">' + esc(hangLabel(v)) + "</div>" +
+        '<div class="op" data-vdr="' + v.id + '" title="编辑 / 删除">⋯</div></div>').join("")
+    : '<div class="empty">还没有外包商，下面填一个</div>';
+  $("#vdrList").querySelectorAll("[data-vdr]").forEach((el) => {
+    el.onclick = () => {
+      const id = parseInt(el.dataset.vdr, 10);
+      popup([
+        { label: "编辑外包商", fn: () => window.__vdrEdit(id) },
+        { sep: true },
+        { label: "删除外包商", danger: true, fn: () => window.__vdrDel(id) },
+      ], el);
+    };
+  });
 }
 
 function renderClients() {
@@ -3043,7 +3709,10 @@ async function showAlerts() {
   if (!a.total) { popup([{ label: "没有停滞或临期的项目", dim: true }], $("#foot")); return; }
   const items = [];
   a.stale.forEach((x) => items.push({ label: "停滞 · " + x.title + "（" + x.detail + "）", dim: true }));
-  a.due.forEach((x) => items.push({ label: "临期 · " + x.title + "（" + x.detail + "）", dim: true }));
+  /* 结款逾期（已交付项目）跟制作临期不是一回事，前缀分开写 */
+  a.due.forEach((x) => items.push({
+    label: (x.settle ? "结款 · " : "临期 · ") + x.title + "（" + x.detail + "）", dim: true,
+  }));
   if (a.stale.length && a.due.length) items.splice(a.stale.length, 0, { sep: true });
   popup(items, $("#foot"));
 }
@@ -3099,6 +3768,8 @@ whenReady(async () => {
   applyTheme();
   bindHeader();
   bindNew();
+  bindDateDialog();
+  bindProjSet();
   bindNodes();
   bindSettings();
   bindCheck();

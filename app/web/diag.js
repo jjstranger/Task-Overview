@@ -22,6 +22,81 @@ function rowOf(kind, id) {
 }
 const nodeRow = (id) => rowOf("node", id);
 
+/* 找不到行时的现场快照。
+   2026-10-16 加：multi 段后半 + date 段突然一起报「行找不到」，而数据（行数、
+   选择条数）跟上一轮一模一样 —— 只记 has:false 根本分不清是**树折叠了**
+   （行没渲染）、**id 对不上**、还是**压根不在这一页**。
+   ⚠ 只在失败路径调用，正常跑不花时间。 */
+const treeSnap = () => ({
+  rows: Array.from(document.querySelectorAll("#tree .row"))
+    .map((el) => (el.dataset.kind || "?") + ":" + (el.dataset.id || "?")),
+  shut: Array.from(document.querySelectorAll("#tree .row .tw"))
+    .filter((e) => e.textContent === "▶").length,
+  open: Array.from(document.querySelectorAll("#tree .row .tw"))
+    .filter((e) => e.textContent === "▼").length,
+  page: (document.querySelector("#segPage button.act") || {}).textContent || null,
+  /* 数据里到底有几个项目、各自什么状态、几个环节 ——
+     跟 rows 一对，就能分辨"是筛选/隐藏把行滤掉了"还是"数据没了" */
+  prj: (() => {
+    try {
+      return (D.groups || []).map((g) => g.key + ": " + (g.projects || [])
+        .map((p) => "#" + p.id + "(" + p.status + "," + (p.children || []).length + "节)")
+        .join(" "));
+    } catch (e) { return String(e); }
+  })(),
+  /* collapsed 是**落库**的（`set_collapsed` / `collapse_all`），所以"行不见了"
+     可能是"库里就折着"—— 光看 DOM 数不出这个，得从 D 里数。 */
+  coll: (() => {
+    try {
+      let p = 0, nd = 0;
+      (D.groups || []).forEach((g) => (g.projects || []).forEach((x) => {
+        if (x.collapsed) p++;
+        const walk = (arr) => (arr || []).forEach((y) => {
+          if (y.collapsed) nd++;
+          walk(y.children);
+        });
+        walk(x.children);
+      }));
+      return p + "项目/" + nd + "环节折着";
+    } catch (e) { return String(e); }
+  })(),
+  bar: Array.from(document.querySelectorAll("#treeBar button")).map((b) => b.textContent),
+});
+
+/* ---------- 仅自检使用的版式量尺 ---------- */
+
+/* 一段文字**实际画出来几行**。inline 元素每个 line box 一个 rect，
+   所以 `getClientRects().length` 就是真实行数 —— 比 offsetHeight 稳
+   （后者受 padding / 行高影响，且看不出折行）。
+
+   2026-10-13 加：`preview_gen.py` 的注释里早写过「冒烟只能断言元素在不在、
+   类名对不对，看不出挤到一起了」，而**金额 + 税率% + 税后提示**那一行正是
+   这个盲区 —— 三个控件加一句中文提示挤在 520px 的弹窗里，放不下时
+   「（税后 94,339.62 元）」会**静默折成两行**，看起来像排版坏了。
+   以后凡是"一行里塞了好几个控件"的地方，都可以用它钉住。 */
+const textLines = (el) => (el ? el.getClientRects().length : -1);
+
+/* 一行的横向余量：正数 = 还空着多少 px；负数 = 内容已经溢出。
+   ⚠ flex 行里子项会被压缩（不溢出但文字折行），所以判断折行**以 textLines 为准**，
+   这个数用来看"还剩多少余量、要不要再收一点"。 */
+const rowSlack = (el) => (el ? el.clientWidth - el.scrollWidth : null);
+
+/* 一整行里**所有**带文字的元素各画了几行，取最大值。
+   ⚠ 只盯某一个元素会被骗：2026-10-13 那次就是「税后提示没折、旁边的『税率%』
+   被拆成两行」，只看 #finNet 永远看不见。input/select/textarea/button 不算
+   （它们的文字不做折行，且 rect 语义不同）。 */
+function rowMaxLines(rowEl) {
+  if (!rowEl) return -1;
+  const skip = { INPUT: 1, SELECT: 1, TEXTAREA: 1, BUTTON: 1 };
+  let mx = 0;
+  rowEl.querySelectorAll("*").forEach((el) => {
+    if (skip[el.tagName]) return;
+    if (!(el.textContent || "").trim()) return;
+    mx = Math.max(mx, el.getClientRects().length);
+  });
+  return mx;
+}
+
 /* ---------- 仅自检使用的页面切换 ---------- */
 
 /* 自检和快捷键都走这里，保证「点页签」和「调 setView」是同一条路径 */
@@ -42,7 +117,7 @@ async function diagReport() {
     Promise.resolve(p),
     new Promise((_, rj) => setTimeout(() => rj(new Error("超时 " + ms + "ms @ " + label)), ms)),
   ]);
-  const rep = { stages: [] };
+  const rep = { stages: [], timings: {} };
   const step = async (s) => {
     rep.stages.push(s);
     await guard(call("diag_stage", s), 4000, "diag_stage:" + s);
@@ -51,8 +126,13 @@ async function diagReport() {
 
   const phase = async (name, ms, fn) => {
     if (failed) return;             // 前面挂了就不要再往下跑，免得连环报错
+    /* 记每段真实耗时（秒，一位小数）。2026-10-13 加：那阵子多段开始超时，
+       光看"哪段超时"分不清"这段本来就慢"还是"这台机器整体变慢" ——
+       有了它一眼就能看出是某段贴着预算，还是每段都翻倍。 */
+    const t0 = Date.now();
     try { await guard(fn(), ms, name); }
     catch (e) { failed = name; rep.err = String((e && e.message) || e); }
+    rep.timings[name] = Math.round((Date.now() - t0) / 100) / 10;
   };
 
   await phase("tree", 8000, async () => {
@@ -179,6 +259,14 @@ async function diagReport() {
       duePh: ($("#newDlPh") || {}).textContent || "",
       duePhShown: (() => {
         const e = $("#newDlPh");
+        return !!e && getComputedStyle(e).display !== "none";
+      })(),
+      /* 结款日期（2026-10-13 新增）跟截止日期是同一套：原生 date 框 + 自绘占位。
+         它是「结款逾期 N 天」的**唯一**依据，所以框本身在不在必须钉住。 */
+      settleType: ($("#newSettle") || {}).type || "",
+      settlePh: ($("#newSettlePh") || {}).textContent || "",
+      settlePhShown: (() => {
+        const e = $("#newSettlePh");
         return !!e && getComputedStyle(e).display !== "none";
       })(),
       /* 自绘占位盖在 input 上，少了 pointer-events:none 就点不开日历 —— 占位中心点上
@@ -506,6 +594,25 @@ async function diagReport() {
       rows: n("#finTable .ftrow.body"),
       aging: n("#finAging .abk"),
       clients: n("#finClientSum .ftrow"),
+      /* 外包商汇总（2026-10-16 打通外包商 ↔ 外包支出）。
+         行数要算**数据行**，不算表头 —— 直接数 .ftrow 会把 head 也算进去，
+         那正好是最容易写成假绿的地方（没有数据时 head 也不画，所以 ≥1 会绿）。 */
+      vendorRows: n("#finVendorSum .ftrow.body"),
+      vendorHead: Array.from(document.querySelectorAll("#finVendorSum .ftrow.head > div"))
+        .map((e) => e.textContent),
+      /* 样本：冒烟工作室（团队）名下一笔已付 20000 + 一笔应付 5000 */
+      vendorRow: (() => {
+        const el = Array.from(document.querySelectorAll("#finVendorSum .ftrow.body"))
+          .find((r) => (r.querySelector(".nm") || {}).textContent === "冒烟工作室");
+        if (!el) return null;
+        return {
+          cells: Array.from(el.children).map((c) => c.textContent),
+          type: (el.children[1] || {}).textContent || "",
+        };
+      })(),
+      /* 账面上的那两笔也必须带上外包商名字（明细里"钱付给了谁"） */
+      outsourceVendor: (fin.records || [])
+        .filter((r) => r.kind === "outsource").map((r) => r.vendor || ""),
       /* 口径：外包支出要能从卡片的数里对上（已收 − 外包 = 实际收入） */
       money: {
         received: (fin.cards || {}).received,
@@ -537,7 +644,498 @@ async function diagReport() {
         closePopup();
         return items;
       })(),
+      /* 四组数据的标签页（2026-10-16）：顺序 + 默认「项目款项」+ 只露一个。
+         ⚠ 表格 DOM 一直都在（切 tab 只改 display），所以光数行数看不出 tab 有没有work ——
+         必须真的点一下再读 display。
+         ⚠ 键名带 finTab 前缀：`rep.fin.tabAct` 已经被上面的**页面页签**占了
+           （项目 / 财务 / 活跃），同名会把那个覆盖掉。 */
+      finTabBtns: Array.from(document.querySelectorAll("#finTabs button")).map((b) => b.textContent),
+      finTabKeys: Array.from(document.querySelectorAll("#finTabs button")).map((b) => b.dataset.t),
+      finTabAct: (document.querySelector("#finTabs button.act") || { dataset: {} }).dataset.t || null,
+      paneVis: ["#fsPrj", "#fsCli", "#fsVdr", "#fsAge"].map((s) => {
+        const el = document.querySelector(s);
+        return el ? getComputedStyle(el).display !== "none" : null;
+      }),
     };
+
+    /* 切到「应收账龄」再切回「项目款项」：验证切换真换表、且切回来没问题。
+       （放在 rep.fin 赋值之后 —— 赋值那一刻要的是"默认态"的快照。） */
+    const finTabClick = async (t) => {
+      const b = document.querySelector('#finTabs button[data-t="' + t + '"]');
+      if (b) { b.click(); await wait(180); }
+    };
+    await finTabClick("age");
+    rep.fin.ageAct = (document.querySelector("#finTabs button.act") || { dataset: {} }).dataset.t || null;
+    rep.fin.ageVis = ["#fsPrj", "#fsCli", "#fsVdr", "#fsAge"].map((s) => {
+      const el = document.querySelector(s);
+      return el ? getComputedStyle(el).display !== "none" : null;
+    });
+    rep.fin.ageTable = n("#finAging .abk");           // 切过去后账龄表还在、有格子
+    await finTabClick("prj");
+    rep.fin.backVis = getComputedStyle($("#fsPrj")).display !== "none";
+  });
+
+  /* 税后提示 + 「结款（核销待收）」（2026-10-13 新增，2026-10-16 改口径）。
+     ⚠ 必须**走完整点击路径**（建样本 → 点按钮 → 点确认 → 回查库）：
+        只断言"按钮画出来了"是假绿 —— 2026-10-10 那个删除按钮就是这么一路绿灯
+        而功能是坏的（绑了 ReferenceError，点了没反应）。
+
+     2026-10-16 改了什么：结款从"把合同额改成实收、多余的合同额记录合并删除"
+     改成"核销差额"。所以这里最要紧的两条断言是「**合同额一条没动**」和
+     「**多出一条核销记录**」—— 旧口径下这两条必挂，正好把改动钉死。 */
+  await phase("payoff", 30000, async () => {
+    await step("payoff");
+    const pp = {};
+    const errBefore = window.__err;
+    const realAlert = window.alert;
+
+    /* 样本建在**临时项目**上（跑完删干净），不碰冒烟主数据 */
+    const made = await call("add_project", "结款冒烟样本", "commercial", 0, "",
+                            { contract: "100000" });
+    const pid = made && made.id;
+    pp.made = !!pid;
+    const today = isoOf(new Date());
+    await call("finance_add", { kind: "payment", project_id: pid, amount: "30000",
+                                date: today, status: "已收" });
+    await call("finance_add", { kind: "payment", project_id: pid, amount: "5000",
+                                date: today, status: "待收" });   // 没到手，不该计入
+    await reload();
+    await wait(400);
+
+    /* 打开「记一笔」并选到这个项目 */
+    openFinDialog(null, pid);
+    await wait(500);
+    pp.dlgOpen = getComputedStyle($("#ovFin")).display !== "none";
+    pp.prjOk = String($("#finPrj").value) === String(pid);
+    pp.btnText = (($("#finPayoff") || {}).textContent || "").trim();
+    pp.btnCls = ($("#finPayoff") || {}).className || "";
+    pp.visWhenPayment = getComputedStyle($("#finPayoffRow")).display !== "none";
+    /* 「核销」这颗类型按钮得真的画出来（2026-10-16 新增的第五种款项） */
+    pp.kinds = Array.from(document.querySelectorAll("#finKind button"))
+      .map((b) => b.dataset.k);
+
+    /* ---- 税后提示：填了金额 + 税率才出现，算式是 金额 ÷ (1+税率%) ----
+       ⚠ 用真的 input 事件，别直接调 syncFinNet —— 那测的是函数不是**绑定**。 */
+    const fire = (sel, v) => {
+      const el = $(sel);
+      el.value = v;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    fire("#finAmount", "100000");
+    fire("#finTax", "6");
+    await wait(150);
+    pp.netText = ($("#finNet").textContent || "").trim();
+    fire("#finTax", "");
+    await wait(120);
+    pp.netEmptyNoTax = ($("#finNet").textContent || "").trim() === "";
+    fire("#finTax", "6%");                       // 「6%」带百分号也要认
+    await wait(120);
+    pp.netPercent = ($("#finNet").textContent || "").trim();
+
+    /* ---- 版式：这行**必须一行画完**（2026-10-13 用户反馈"文字换行、难看"）----
+       挑两个代表性样本：100000（常规）和 1234567.89（七位数，接近合同额量级）。
+       ⚠ 判据是 rowMaxLines（整行所有文字的最大行数），**不是**只看税后提示 ——
+       这次真正被挤折的是旁边的「税率%」，只看 #finNet 永远看不见。 */
+    fire("#finAmount", "100000");
+    fire("#finTax", "6");
+    await wait(150);
+    pp.finNetText = (($("#finNet").textContent) || "").trim();
+    pp.finRowLines = rowMaxLines($("#finNet").closest(".fld"));
+    fire("#finAmount", "1234567.89");
+    fire("#finTax", "13");
+    await wait(150);
+    pp.finNetTextBig = (($("#finNet").textContent) || "").trim();
+    pp.finRowLinesBig = rowMaxLines($("#finNet").closest(".fld"));
+    pp.finRow = (() => {
+      const f = $("#finNet").closest(".fld");
+      return { h: f.offsetHeight, slack: rowSlack(f), boxW: $("#ovFin .ovbox").clientWidth };
+    })();
+
+    /* ---- 最严苛的一档：弹窗**出现纵向滚动条**时（窗口矮了就出）。 ----
+       `.ovbox` 是 max-height:86% + overflow:auto，滚动条白吃 15px ——
+       加宽之前这行的余量正好是 0，一吃就挤折（整行 50px → 67px）。
+       这里人工把 overflow-y 设成 scroll 把这 15px 扣掉，钉住"有滚动条也不折"。 */
+    (() => {
+      const box = $("#ovFin .ovbox");
+      const before = box.clientWidth;
+      box.style.overflowY = "scroll";
+      pp.finScrollCost = before - box.clientWidth;
+    })();
+    await wait(150);
+    pp.finRowLinesScroll = rowMaxLines($("#finNet").closest(".fld"));
+    pp.finRowHScroll = $("#finNet").closest(".fld").offsetHeight;
+    $("#ovFin .ovbox").style.overflowY = "";
+
+    fire("#finAmount", "abc");                   // 金额乱填 → 提示必须消失，不能瞎算
+    await wait(120);
+    pp.netEmptyBadAmount = ($("#finNet").textContent || "").trim() === "";
+    fire("#finAmount", "");
+    fire("#finTax", "");
+
+    /* 换成「核销」→ 外包商 / 发票号 / 结款三条行都收起（它只跟各自的类型绑），
+       状态档位也只有「已核销 / 作废」两档 —— 撤销核销就是把它改作废。 */
+    const kbtn = (k) => Array.from(document.querySelectorAll("#finKind button"))
+      .find((b) => b.dataset.k === k);
+    kbtn("writeoff").click();
+    await wait(280);
+    pp.woHides = getComputedStyle($("#finVendorRow")).display === "none"
+      && getComputedStyle($("#finInvRow")).display === "none"
+      && getComputedStyle($("#finPayoffRow")).display === "none";
+    pp.woStatus = $("#finStatus").value;
+    pp.woStatusList = Array.from($("#finStatus").options).map((o) => o.value);
+
+    /* 换类型 → 结款按钮必须收起来（它只跟「到账」有关），切回来还得在 */
+    kbtn("contract").click();
+    await wait(250);
+    pp.btnHiddenWhenContract = getComputedStyle($("#finPayoffRow")).display === "none";
+    kbtn("invoice").click();
+    await wait(200);
+    pp.btnHiddenWhenInvoice = getComputedStyle($("#finPayoffRow")).display === "none";
+    kbtn("payment").click();
+    await wait(250);
+    pp.btnBackWhenPayment = getComputedStyle($("#finPayoffRow")).display !== "none";
+
+    /* ---- 点「结款（核销待收）」 → 确认弹层 ---- */
+    $("#finPayoff").click();
+    await wait(900);
+    pp.confirmOpen = getComputedStyle($("#ovPayoff")).display !== "none";
+    pp.head = (($("#payHead") || {}).textContent || "").trim();
+    pp.listRows = $("#payList").querySelectorAll("div").length;
+    pp.listText = (($("#payList") || {}).textContent || "").trim().slice(0, 140);
+    pp.foot = (($("#payFoot") || {}).textContent || "").trim();
+
+    /* ---- 点「确认结款」—— 到这一步才真的写库 ---- */
+    $("#payOk").click();
+    await wait(1400);
+    pp.confirmClosed = getComputedStyle($("#ovPayoff")).display === "none";
+    pp.formClosed = getComputedStyle($("#ovFin")).display === "none";
+
+    const fd = await call("finance_data", 0, 0, "CNY");
+    const pr = ((fd && fd.projects) || []).find((x) => x.project_id === pid) || {};
+    pp.contractAfter = pr.contract;
+    pp.receivedAfter = pr.received;
+    pp.pendingAfter = pr.pending;
+    pp.writeoffAfter = pr.writeoff;
+    pp.settled = pr.settled === true;
+    const pre = ((fd && fd.records) || []).filter((r) => r.project_id === pid);
+    pp.recCount = pre.length;
+    pp.contractRecs = pre.filter((r) => r.kind === "contract").length;
+    pp.woRecs = pre.filter((r) => r.kind === "writeoff")
+      .map((r) => [r.amount, r.status, r.note]);
+    pp.errNew = window.__err === errBefore ? null : window.__err;
+
+    /* ---- 幂等：再点一次「结款」→ 必须明说"已经结清了"，且一个字节都不改 ---- */
+    window.alert = (m) => { window.__alertPo = String(m); };
+    window.__alertPo = "";
+    openFinDialog(null, pid);
+    await wait(400);
+    $("#finPayoff").click();
+    await wait(900);
+    pp.againAlert = window.__alertPo;
+    /* 没待收可核销就别开确认弹层（开了让人点完发现啥也没发生最恼人） */
+    pp.againNoDlg = getComputedStyle($("#ovPayoff")).display === "none";
+    const pre2 = ((await call("finance_data", 0, 0, "CNY")).records || [])
+      .filter((r) => r.project_id === pid);
+    pp.againSameCount = pre2.length === pp.recCount;
+    window.alert = realAlert;
+    modal("#ovFin", false);
+    await wait(200);
+
+    /* ---- 建项目弹窗那条通道也得验（绑定是分开写的，只测一边就是漏） ---- */
+    modal("#ovFin", false);
+    openNewDialog();
+    await wait(350);
+    fire("#newAmount", "100000");
+    fire("#newTax", "6");
+    await wait(150);
+    pp.newNetText = (($("#newNet") || {}).textContent || "").trim();
+    /* 新建项目页那行结构完全一样，一起钉（2026-10-13） */
+    pp.newRowLines = rowMaxLines($("#newNet").closest(".fld"));
+    fire("#newAmount", "1234567.89");
+    fire("#newTax", "13");
+    await wait(150);
+    pp.newNetTextBig = (($("#newNet") || {}).textContent || "").trim();
+    pp.newRowLinesBig = rowMaxLines($("#newNet").closest(".fld"));
+    pp.newRow = (() => {
+      const f = $("#newNet").closest(".fld");
+      return { h: f.offsetHeight, slack: rowSlack(f), boxW: $("#ovNew .ovbox").clientWidth };
+    })();
+    modal("#ovNew", false);
+    await wait(200);
+
+    /* 收拾干净：样本的款项 + 项目全删掉，别影响后面的 phase */
+    const recs = ((fd && fd.records) || []).filter((r) => r.project_id === pid);
+    for (const r of recs) await call("finance_delete", r.id);
+    await call("delete", "project", pid);
+    await reload();
+    await wait(300);
+    const fd2 = await call("finance_data", 0, 0, "CNY");
+    pp.gone = !(((fd2 && fd2.projects) || []).some((x) => x.project_id === pid));
+
+    pp.ok = pp.made && pp.dlgOpen && pp.prjOk
+      && pp.kinds.indexOf("writeoff") >= 0
+      && pp.woHides && pp.woStatus === "已核销"
+      && pp.woStatusList.join() === "已核销,作废"
+      && pp.visWhenPayment && pp.btnHiddenWhenContract && pp.btnHiddenWhenInvoice
+      && pp.btnBackWhenPayment
+      && pp.confirmOpen && pp.listRows === 2
+      /* 样本里只有 30000 是「已收」（另 5000 是待收，不该计入）。
+         要是把待收也算进来就会变成 35000 —— 这条同时钉住了"待收不算"。 */
+      && pp.receivedAfter === 30000 && pp.pendingAfter === 0
+      /* 2026-10-16 改口径的两条命门：合同额一条没动（还是 100000、还是那 1 条），
+         凭空多出一条核销 = 70000（100000 − 30000）。旧口径下这里会是
+         contractAfter === 30000 且没有核销记录 —— 正好把改动钉死。 */
+      && pp.contractAfter === 100000 && pp.contractRecs === 1
+      && pp.writeoffAfter === 70000 && pp.woRecs.length === 1
+      && pp.woRecs[0][0] === 70000 && pp.woRecs[0][1] === "已核销"
+      && pp.woRecs[0][2] === "结款核销"
+      && pp.recCount === 4                       // 合同 1 + 到账 2 + 核销 1
+      && pp.settled === true
+      /* 幂等：再点一次只说"已经结清了"，不开确认弹层、不加记录 */
+      && /已经结清/.test(pp.againAlert) && pp.againNoDlg && pp.againSameCount
+      && pp.confirmClosed && pp.formClosed && !pp.errNew && pp.gone;
+    rep.payoff = pp;
+  });
+
+  /* 逾期文案三条（2026-10-13 用户定的口径）：
+       ① 筹备   → 不算停滞
+       ② 已交付 → 不算停滞，改报「结款逾期 N 天」。起算日是**用户手填的结款日期**
+                  （settle_date）—— 没填就不报。上一版拿交付日期（delivered_at）
+                  反推，2026-10-13 第二轮被用户否掉：那会凭空冒出一个跟合同无关的"逾期"。
+       ③ 其余   → 「制作逾期 N 天」（原先叫「逾期 N 天」）
+     样本建在**临时项目**上、跑完删干净，不碰冒烟主数据。
+     ⚠ 必须真写库再重新 load（load → 行渲染）—— 只改前端内存里的数字断言渲染，
+        测的是拼字符串、不是这条通路（2026-10-10 那个删除按钮就这么假绿过去的）。
+     ⚠ ①「不显示停滞」和 staleB/C 那两条是**弱断言**：新建项目刚 _touch 过，
+        本来就不会停滞。能钉住口径的强断言在数据层 tests/smoke_db.py
+        （那边能把 last_activity_at 拨到 2020 年）。 */
+  await phase("settle", 25000, async () => {
+    await step("settle");
+    const sv = {};
+    const errBefore = window.__err;
+    const ago = (k) => isoOf(new Date(Date.now() - k * 86400000));
+    const rowOf = (pid) => document.querySelector(
+      '#tree .row[data-kind="project"][data-id="' + pid + '"]');
+    const dueOf = (pid) => {
+      const r = rowOf(pid);
+      return r ? ((r.querySelector(".due") || {}).textContent || "") : null;
+    };
+    const staleOf = (pid) => {
+      const r = rowOf(pid);
+      return r ? !!r.querySelector(".stale") : null;
+    };
+
+    /* ① 筹备 */
+    const pB = (await call("add_project", "逾期冒烟B", "commercial", 0, "", {})).id;
+    await call("set_status", "project", pB, "筹备");
+    /* ② 进行中 + 截止日过了 5 天 */
+    const pA = (await call("add_project", "逾期冒烟A", "commercial", 0, "", {})).id;
+    await call("set_field", "project", pA, "deadline", ago(5));
+    /* ③ 已交付：截止日故意拨到 30 天前 —— 证明已交付**不**报制作逾期 */
+    const pC = (await call("add_project", "逾期冒烟C", "commercial", 0, "", {})).id;
+    await call("set_field", "project", pC, "deadline", ago(30));
+    await call("set_status", "project", pC, "已交付");
+
+    /* 没填结款日期 → 一颗红字都不该有（这就是"不拿交付日期推算"的现场证据：
+       这项目 30 天前"交付"过、截止日也早炸了，照样什么都不报） */
+    await reload();
+    await wait(500);
+    sv.noSettleDate = dueOf(pC);
+    sv.rowP = rowOf(pC) ? 1 : 0;
+
+    /* 填上 12 天前的结款日期 → 才报「结款逾期 12 天」 */
+    await call("set_field", "project", pC, "settle_date", ago(12));
+    await reload();
+    await wait(500);
+    const nowP = D.groups.reduce((acc, g) => acc.concat(g.projects), []);
+    const rowC = nowP.find((p) => p.id === pC) || {};
+    sv.settleDate = rowC.settle_date || "";
+    sv.oldFieldGone = !("delivered_at" in rowC);   // 这个字段前端已经收不到了
+    sv.dueA = dueOf(pA);                        // 「制作逾期 5 天」
+    sv.dueC = dueOf(pC);                        // 「结款逾期 12 天」
+    sv.staleB = staleOf(pB);
+    sv.staleC = staleOf(pC);
+    /* 底栏那个数要把结款逾期算进去，否则行上报红、底栏还是 0 */
+    sv.statsDue = (D.stats || {}).due;
+
+    /* 告警面板：结款那条带 settle 标记，制作那条不带 */
+    const al = await call("alerts");
+    const cD = ((al && al.due) || []).filter((x) => x.owner === "project" && x.id === pC)[0] || {};
+    const aD = ((al && al.due) || []).filter((x) => x.owner === "project" && x.id === pA)[0] || {};
+    sv.alertsSettle = cD.settle === true && cD.detail === "结款逾期 12 天";
+    sv.alertsNormal = aD.settle === false && aD.detail === "制作逾期 5 天";
+    sv.inStaleList = ((al && al.stale) || [])
+      .some((x) => x.project_id === pB || x.project_id === pC);
+
+    /* 收拾干净：三个样本全删，别影响后面的 phase */
+    for (const pid of [pA, pB, pC]) await call("delete", "project", pid);
+    await reload();
+    await wait(300);
+    const left = (await call("load", 1)).groups.reduce((acc, g) => acc.concat(g.projects), []);
+    sv.gone = !left.some((p) => [pA, pB, pC].indexOf(p.id) >= 0);
+    sv.errNew = window.__err === errBefore ? null : window.__err;
+
+    sv.ok = sv.noSettleDate === "" && sv.rowP === 1
+      && sv.settleDate === ago(12) && sv.oldFieldGone
+      && sv.dueA === "制作逾期 5 天"
+      && sv.dueC === "结款逾期 12 天"
+      && sv.staleB === false && sv.staleC === false
+      && sv.statsDue >= 2
+      && sv.alertsSettle && sv.alertsNormal && !sv.inStaleList
+      && sv.gone && !sv.errNew;
+    rep.settle = sv;
+  });
+
+  /* 项目设置页（2026-10-13 新增）：⋯ 菜单里原来散着「编辑截止日期 / 改客户 /
+     改分类」，现在合成一页（版面照抄新建项目）。这一段真走点击路径：
+       ⋯ → 断旧入口没了、新入口在 → 点「项目设置…」→ 改 6 个字段 → 点「保存」→ 断落库。
+     ⚠ 必须**点按钮**，不能直调 call("set_field")：否则"菜单项没接上 / 弹窗没打开 /
+        保存没绑事件"这类问题全靠肉眼（2026-10-10 那个删除按钮就是这么假绿过去的）。
+     ⚠ 客户只用**已有的种子客户**，不新建 —— create phase 里钉着客户计数（1 → 2），
+        这里多造一个客户会让那条断言莫名其妙地红。
+     ⚠ 样本项目跑完全删，不给冒烟主数据留痕。 */
+  await phase("prjset", 25000, async () => {
+    await step("prjset");
+    const pv = {};
+    const errBefore = window.__err;
+    const fut = isoOf(new Date(Date.now() + 30 * 86400000));
+    const past = isoOf(new Date(Date.now() - 7 * 86400000));
+    const pid = (await call("add_project", "设置页冒烟P", "commercial", 0, "", {})).id;
+    const seed = (D.clients || [])[0] || {};
+    /* 分类要换一个**别的**筐（库里只有一个分类时就跳过这一项，别把断言做虚） */
+    const gs = D.groups || [];
+    const other = gs.filter((g) => g.key !== "commercial")[0] || null;
+    const rowOf_ = (id) => {
+      const r = document.querySelector(
+        '#tree .row[data-kind="project"][data-id="' + id + '"]');
+      return r ? ((r.querySelector(".title") || {}).textContent || "") : null;
+    };
+    await reload();
+    await wait(400);
+
+    const row = document.querySelector(
+      '#tree .row[data-kind="project"][data-id="' + pid + '"]');
+    pv.rowOk = !!row;
+    /* ① 菜单：项目设置… 在，旧的三条没了（编辑截止日期 / 改客户 / 改分类） */
+    row.querySelector(".mini.more").click();
+    await wait(250);
+    const pop = document.querySelector(".popup");
+    const labels = pop ? Array.from(pop.children).map((d) => d.textContent || "") : [];
+    pv.menu = labels;
+    pv.hasSet = labels.some((x) => x.indexOf("项目设置") === 0);
+    pv.oldGone = !labels.some((x) => x.indexOf("编辑截止日期") === 0
+      || x.indexOf("改客户") === 0 || x.indexOf("改分类") === 0);
+    pv.keepNote = labels.some((x) => x.indexOf("编辑备注") === 0);
+    /* ② 点「项目设置…」→ 弹窗要开，且预填的是这个项目现在的值 */
+    const item = pop ? Array.from(pop.children)
+      .find((d) => (d.textContent || "").indexOf("项目设置") === 0) : null;
+    pv.itemHit = !!item;
+    if (item) { item.click(); await wait(400); }
+    pv.dlgOpen = getComputedStyle($("#ovPrjSet")).display !== "none";
+    pv.preTitle = $("#psTitle").value;
+    pv.prePath = $("#psPath").value;
+    pv.preSettle = $("#psSettle").value;
+    pv.catBtns = Array.from(document.querySelectorAll("#psSegCat button")).map((b) => b.dataset.c);
+    pv.catAct = (document.querySelector("#psSegCat button.act") || { dataset: {} }).dataset.c || "";
+    /* 制作人（2026-10-16 起是外包商名录的下拉）：预填必须是**名字**，
+       候选里得真有那几条（#vendorOpts 是文档级 datalist，两处共用）。
+       预填成 id 或者候选空着，界面上都看不出来 —— 只有真读一次才露馅。 */
+    pv.artistPre = $("#psArtist").value;
+    pv.artistList = ($("#psArtist").getAttribute("list") || "");
+    pv.artistOpts = Array.from(document.querySelectorAll("#vendorOpts option"))
+      .map((o) => o.value);
+    pv.vendorsInData = (D.vendors || []).map((v) => v.name);
+
+    /* ③ 改一整套字段（都走界面输入框，不碰 call()） */
+    $("#psTitle").value = "设置页冒烟P改";
+    $("#psDl").value = fut;
+    $("#psSettle").value = past;
+    $("#psClient").value = seed.name || "";
+    $("#psPath").value = "/冒烟/设置页目录";
+    /* 制作人填一个**名录里没有的**新名字 —— 走的是 ensureVendor 现建现挂那条路。
+       ⚠ 这条是本次改动最容易假绿的地方：填了名字存下去，"界面看着有名字"，
+       但那可能是前端自己拼的、库里其实还是个空 id。所以断言要落到 load() 的
+       artist + artist_id 两个键上。 */
+    const newVn = "设置页冒烟V";
+    const vBefore = (D.vendors || []).map((v) => v.name);
+    $("#psArtist").value = newVn;
+    const wantCat = other ? other.key : "commercial";
+    pv.wantCat = wantCat;
+    pv.seedClient = seed.name || null;
+    const cb = document.querySelector('#psSegCat button[data-c="' + wantCat + '"]');
+    pv.catClicked = !!cb;
+    if (cb) cb.click();
+    $("#psOk").click();
+    await wait(1800);
+
+    pv.dlgClosed = getComputedStyle($("#ovPrjSet")).display === "none";
+    const after = (await call("load", 1)).groups
+      .reduce((acc, g) => acc.concat(g.projects), []);
+    const p = after.find((x) => x.id === pid) || {};
+    pv.title = p.title || null;
+    pv.dl = p.deadline || null;
+    pv.settle = p.settle_date || null;
+    pv.client = p.client || null;
+    pv.cat = p.category || null;
+    const lk = (p.links || []).filter((l) => l.label === "项目根目录");
+    pv.path = lk.length ? lk[0].path : null;
+    pv.links = (p.links || []).length;
+    /* 制作人：① 名字从 vendors JOIN 出来 ② artist_id 真落库了 ③ 条目是**现建**的
+       （列表明明没有这个名字，存完却在库里 —— 说明 ensureVendor 那段真跑了）。 */
+    pv.artist = p.artist || null;
+    pv.artistId = p.artist_id || 0;
+    const vAfter = ((await call("load", 1)).vendors || []);
+    pv.vendorMade = vAfter.some((v) => v.name === newVn) && !vBefore.includes(newVn);
+    pv.vendorMadeId = (vAfter.find((v) => v.name === newVn) || {}).id || 0;
+    pv.artistLinked = !!pv.artistId && pv.artistId === pv.vendorMadeId;
+    /* 行上也要跟着变（改了标题却还画着旧名 = 保存后没重画） */
+    pv.rowTitle = rowOf_(pid);
+
+    /* ④ 撤销路径：把结款日期 / 制作人清空，看它们能不能真的清掉（不是"改了不动"） */
+    openProjSet(p);
+    await wait(300);
+    pv.artistPre2 = $("#psArtist").value;      // 重开时得把那名字带回来
+    $("#psSettle").value = "";
+    $("#psArtist").value = "";
+    $("#psOk").click();
+    await wait(1600);
+    const after2 = (await call("load", 1)).groups
+      .reduce((acc, g) => acc.concat(g.projects), []);
+    const p2 = after2.find((x) => x.id === pid) || {};
+    pv.settleCleared = !(p2.settle_date || "");
+    pv.artistCleared = !(p2.artist_id || 0) && !(p2.artist || "");
+    /* 清掉挂靠 ≠ 删条目：名录里那个人得还在（不然"清空制作人"会顺手删掉别人的档案） */
+    pv.vendorKept = ((await call("load", 1)).vendors || [])
+      .some((v) => v.name === newVn);
+
+    /* 收拾 */
+    modal("#ovPrjSet", false);
+    await call("delete", "project", pid);
+    await reload();
+    await wait(300);
+    const left = (await call("load", 1)).groups.reduce((acc, g) => acc.concat(g.projects), []);
+    pv.gone = !left.some((x) => x.id === pid);
+    /* 那个现建的条目也要带走，别给后面的阶段留一个游离的外包商 */
+    if (pv.vendorMadeId) { await call("vendor_delete", pv.vendorMadeId); }
+    pv.vendorGone = !((await call("load", 1)).vendors || [])
+      .some((v) => v.name === newVn);
+    pv.errNew = window.__err === errBefore ? null : window.__err;
+
+    pv.ok = pv.rowOk && pv.hasSet && pv.oldGone && pv.keepNote && pv.itemHit
+      && pv.dlgOpen && pv.preTitle === "设置页冒烟P" && pv.preSettle === ""
+      && pv.catAct === "commercial" && pv.prePath === ""
+      && pv.catClicked && pv.dlgClosed
+      && pv.title === "设置页冒烟P改" && pv.dl === fut && pv.settle === past
+      && pv.client === (seed.name || null) && pv.cat === wantCat
+      && pv.path === "/冒烟/设置页目录" && pv.links === 1
+      && pv.rowTitle === "设置页冒烟P改"
+      && pv.artistPre === "" && pv.artistList === "vendorOpts"
+      && pv.artistOpts.indexOf("冒烟制作人") >= 0
+      && pv.artist === newVn && pv.artistLinked && pv.vendorMade
+      && pv.artistPre2 === newVn
+      && pv.settleCleared && pv.artistCleared && pv.vendorKept
+      && pv.gone && pv.vendorGone && !pv.errNew;
+    rep.prjset = pv;
   });
 
   /* 导出选项弹窗（#ovExport）：格式 / 时间范围 / 项目 / 内容 + 文件名预览。
@@ -595,6 +1193,164 @@ async function diagReport() {
     out.closed = getComputedStyle($("#ovExport")).display === "none";
     rep.export = out;
   });
+
+  /* 打卡 = 重置「今日必做」（2026-10-09 用户口径）。
+     只验**界面表现**，真重置走数据层断言（tests/smoke_db.py）。
+     ⚠ 绝不点 #checkOk：会真写库、还会把 remind 的打卡状态改掉。 */
+  await phase("checkin", 10000, async () => {
+    await step("checkin");
+    const out = {};
+
+    /* 弹窗里的候选项目 + 默认勾选 */
+    const readList = () => Array.from(document.querySelectorAll("#checkList input"))
+      .map((i) => ({
+        id: i.dataset.id,
+        checked: i.checked,
+        title: (i.parentElement.querySelector("span") || {}).textContent || "",
+      }));
+
+    /* 先手动给一个项目挂上「今日必做」，看它是不是"残留态"*/
+    const first = Array.from(document.querySelectorAll("#tree .row"))
+      .find((r) => r.dataset.kind === "project");
+    out.hasProj = !!first;
+    if (first) {
+      const pid = first.dataset.id;
+      await call("set_field", "project", pid, "priority", 1);
+      await reload();
+      await wait(400);
+      const row = document.querySelector('#tree .row[data-kind="project"][data-id="' + pid + '"]');
+      out.badgeBefore = !!(row && row.querySelector(".badge:not(.st):not(.arch)"));
+      out.statsToday = (D.stats || {}).today;
+
+      openCheck(false);
+      await wait(600);
+      out.dlgOpen = getComputedStyle($("#ovCheck")).display !== "none";
+      const items = readList();
+      out.n = items.length;
+      const mine = items.find((x) => x.id === String(pid));
+      out.defaultChecked = !!(mine && mine.checked);   // priority=1 → 默认勾上
+      out.checkedCount = items.filter((x) => x.checked).length;
+
+      modal("#ovCheck", false);
+      await wait(200);
+      out.dlgClosed = getComputedStyle($("#ovCheck")).display === "none";
+
+      /* 收尾：把这个手动的标记清掉，别让后续 phase 看到脏状态 */
+      await call("set_field", "project", pid, "priority", 0);
+      await reload();
+      await wait(300);
+    }
+    rep.checkin = out;
+  });
+
+  /* 真走「⋯ → 删除」这条点击路径（2026-10-10 补）
+     ---------------------------------------------------------------
+     教训：以前这里只测 `call("delete", "node", id)` —— 直调后端 API，
+     把 `⋯` 菜单、confirm、handler 全绕过去了。于是「删除项引用了不存在
+     的变量、点下去抛 ReferenceError」这种 bug，255 条断言一路全绿。
+     用户实测点不动，代码里却查不出任何红灯 —— 典型的假绿。
+
+     所以这里必须是**真点击**：找行 → 点 .mini.more → 在弹层里按文案找
+     「删除」→ 断言它是 danger（红）→ .click() → 断言 confirm 被问过、
+     后端真的删掉、且 window.__err 里没有异常。
+     样本用自己临时建的环节（不碰冒烟项目的主数据），末尾也会清掉。 */
+  const deldlg = { checked: false };
+  await phase("deldlg", 15000, async () => {
+    await step("deldlg");
+    setView("tree");
+    await wait(300);
+    await call("collapse_all", "expand");
+    await reload();
+    await wait(300);
+
+    const pid = ((D.groups.find((g) => g.key === "commercial") || {}).projects || [])
+      .map((p) => p.id)[0];
+    const prjRow = document.querySelector('#tree .row.prj[data-id="' + pid + '"]');
+    if (!prjRow) { deldlg.err = "找不到样本项目行"; return; }
+
+    /* 在它下面挂一个一次性的环节，待会儿就拿它开刀 */
+    const mk = await call("add_node", pid, null, "删除冒烟样本");
+    await reload();
+    await wait(300);
+    const victimId = mk && mk.id;
+    if (!victimId) { deldlg.err = "样本环节没建出来"; return; }
+    deldlg.made = true;
+
+    const vrow = document.querySelector('#tree .row[data-id="' + victimId + '"]');
+    deldlg.rowFound = !!vrow;
+    if (!vrow) { deldlg.err = "样本环节行没渲染出来"; return; }
+
+    /* confirm 换成替身：原生弹窗会卡住 JS 线程，收尾的 boot_ok 就发不出去
+       （diag.js 里删除客户那段的既有做法，照抄） */
+    const realConfirm = window.confirm, realErr = window.__err;
+    let asked = 0, askedMsg = "";
+    window.confirm = (m) => { asked++; askedMsg = String(m || ""); return true; };
+    try {
+      vrow.querySelector(".mini.more").click();
+      await wait(200);
+      const p = document.querySelector(".popup");
+      deldlg.popupOpen = !!p;
+      const items = p ? Array.from(p.querySelectorAll("div")) : [];
+      const del = items.find((d) => (d.textContent || "").trim() === "删除");
+      deldlg.delFound = !!del;
+      if (!del) { deldlg.labels = items.map((d) => (d.textContent || "").trim()); return; }
+
+      /* 颜色：danger → 红。dim（灰）是"别指望点它"的意思，用在删除上是误导。
+         不猜色值：直接读 CSS 变量（--red / --tx3）拿真值，
+         拿不到变量才退回"红分量明显高于绿蓝"的粗判。主题有明暗两套，
+         写死 #e05c5c / #c0392b 会在换主题那天变成假红。 */
+      const cssVar = (k) => getComputedStyle(document.documentElement)
+        .getPropertyValue(k).trim();
+      const rgbOf = (el) => getComputedStyle(el).color;
+      const toRGB = (c) => {
+        const m = String(c).match(/rgba?\(([^)]+)\)/);
+        if (!m) return null;
+        const p = m[1].split(",").map((x) => parseFloat(x));
+        return p.length >= 3 ? p : null;
+      };
+      /* 变量值可能是 hex，也可能已经是 rgb() —— 借一个元素让浏览器算 */
+      const varRGB = (k) => {
+        const v = cssVar(k);
+        if (!v) return null;
+        const probe = document.createElement("div");
+        probe.style.color = v;
+        document.body.appendChild(probe);
+        const out = toRGB(rgbOf(probe));
+        probe.remove();
+        return out;
+      };
+      deldlg.delClass = del.className;
+      deldlg.delColor = rgbOf(del);
+      const wantRed = varRGB("--red"), grayTx3 = varRGB("--tx3");
+      deldlg.wantRed = wantRed ? "rgb(" + wantRed.join(", ") + ")" : "";
+      deldlg.dimGray = grayTx3 ? "rgb(" + grayTx3.join(", ") + ")" : "";
+      const got = toRGB(deldlg.delColor);
+      deldlg.isRed = !!got && !!wantRed && got.slice(0, 3).join(",") === wantRed.slice(0, 3).join(",");
+      deldlg.isGray = !!got && !!grayTx3 && got.slice(0, 3).join(",") === grayTx3.slice(0, 3).join(",");
+
+      del.click();
+      await wait(400);
+      deldlg.asked = asked;
+      deldlg.askedMsg = askedMsg;
+      /* 异常有没有被 popup() 的兜底吞成 alert 之外的静默失败 —— 查 __err */
+      deldlg.errAfterClick = window.__err || null;
+
+      const gone = ((await call("load")).groups
+        .find((g) => g.key === "commercial") || {}).projects || [];
+      const find = (arr) => {
+        for (const pp of arr) {
+          if ((pp.children || []).some((c) => String(c.id) === String(victimId))) return true;
+        }
+        return false;
+      };
+      deldlg.stillThere = find(gone);
+    } finally {
+      window.confirm = realConfirm;
+      window.__err = realErr;   // 别把自己触发的假错留在全局
+    }
+    deldlg.checked = deldlg.asked > 0 && deldlg.stillThere === false;
+  });
+  rep.deldlg = deldlg;
 
   /* L3 全屏遮挡能否拉起来 */
   await phase("block", 8000, async () => {
@@ -1181,15 +1937,19 @@ async function diagReport() {
               因为"未分配"以前根本不是可选项，补集只从真制作人里凑得出来。
               这里两头都查：数组对 ≠ 屏幕上对，行没变多照样是坏的。 */
         if (nfMulti.hasWhoGroup) {
-          const whoAll = subArtists(pBnow);
+          const whoAll = subArtists(pBnow);     // 存的是 vendors.id（字符串），2026-10-16 起
           const first = whoAll[0];
+          /* ⚠ 菜单上画的是**名字**，数组里存的是 **id** —— 拿 id 去比 label
+             会一个都点不着，而症状只是"反选结果不对"，看着像功能坏了。 */
+          const firstLabel = first ? vendorName(first) : null;
           nfMulti.whoAll = whoAll;
+          nfMulti.whoFirstLabel = firstLabel;
           const titleOf = (el) => ((el.querySelector(".title") || {}).textContent || "");
           const itemOfWho = () => {
             const p = document.querySelector(".popup");
             return p && Array.from(p.querySelectorAll("div"))
               .find((d) => !d.className
-                && d.textContent.replace(/^[✓\u3000]+/, "") === first);
+                && d.textContent.replace(/^[✓\u3000]+/, "") === firstLabel);
           };
           if (first) { const it = itemOfWho(); if (it) it.click(); }
           await wait(300);
@@ -1260,6 +2020,26 @@ async function diagReport() {
     await wait(500);
     const prev = $("#nodesPrev").textContent || "";
     const want = ["s001", "s003A", "s006", "s007", "s008", "s009"];
+    /* 序列模板（2026-10-16）：`WD####(12-20)` 要摊成 WD0012…WD0020。两个读法：
+       - seqPv 走 parse_nodes，纯解析、不掺库里已有的同名，才能精确数出 9 个
+       - seqPrev 走真·界面刷新，证明这条语法**真的接在预览框上**了
+       ⚠ 试完必须把值**放回去**再点创建 —— 不然下面 titles 会凭空多出 9 个。 */
+    const seqPv = await call("parse_nodes", "WD####(12-20)");
+    const seqBadPv = await call("parse_nodes", "WD####(12)");
+    /* ⚠ 界面只动两次、每次 250ms：原来每步 400ms × 3，把本段结束时间推后了
+       1.2 秒。冒烟是**串行**跑在同一个 app 实例上的，多推这一点就够让后面的段
+       踩上偶发的时序抖动（2026-10-16 那次假红，multi 段 pickAfter 从 9 变 1）。
+       能少等就少等 —— 要证明的事（语法接在预览框上）已经由这两次拿到了。 */
+    $("#nodesSpec").value = "WD####(12-20)";
+    await refreshNodesPrev();
+    await wait(250);
+    const seqPrev = $("#nodesPrev").textContent || "";
+    $("#nodesSpec").value = "WD####(12)";
+    await refreshNodesPrev();
+    await wait(250);
+    const seqBadPrev = $("#nodesPrev").textContent || "";
+    $("#nodesSpec").value = "s001,s003A,s006-009";
+    await refreshNodesPrev();
     $("#nodesOk").click();
     await wait(2200);
     const d2 = await call("load");
@@ -1279,6 +2059,15 @@ async function diagReport() {
       n: titles.length,
       dupCreated: again && again.count,
       dupSkipped: ((again || {}).skipped || []).length,
+      /* 序列模板：正确写法要摊开、写歪的要当场报错（两处都验） */
+      seqPvOk: seqPv && seqPv.ok,
+      seqPvCount: seqPv && seqPv.count,
+      seqPvFirst: ((seqPv || {}).items || [])[0],
+      seqPvLast: ((seqPv || {}).items || [])[8],
+      seqBadOk: seqBadPv && seqBadPv.ok,
+      seqPrevOk: seqPrev.indexOf("将创建") >= 0
+        && seqPrev.indexOf("WD0012") >= 0 && seqPrev.indexOf("WD0020") >= 0,
+      seqPrevRed: seqBadPrev.indexOf("✕") >= 0,
     };
   });
 
@@ -1405,7 +2194,19 @@ async function diagReport() {
   });
 
   /* 多选批量（#3）+ 数据文件可设定（#6）：都是"真的点一遍" */
-  await phase("multi", 30000, async () => {
+  /* 多选（2026-10-13 拆出后半段的「数据文件」，并把预算按实测放大）。
+     ⚠ 这一段本来是 multi + 数据文件 + 客户弹窗 三块塞在一个 30 秒预算里。
+     2026-10-13 实测：除它以外的每一段都在 9 秒内（settle 2.6 / prjset 5.5），
+     就它顶着预算超时 —— 三块不相干的功能共用一个预算，谁多一点就全红。
+     拆开之后单看它自己：段内 **68 次 `await wait()` 合计 26.4 秒**，再加 13 次
+     跨桥调用和 9 次 reload，本机实测 30~46 秒 —— 所以预算先给到 60 秒。
+     ⚠ 当晚又超了一次（那次整机明显变慢：全程 3m31s，平时 1m46s），
+     症状是"multi 后面所有段整片 FAIL" —— 后面每段都因为 `failed` 被跳过，
+     看着像功能坏了。**这一段是最重、也是波动最大的一段**，预算再放到 90 秒：
+     它只影响"容忍多久"，断言一条没少，真死锁照样会报。（这些 sleep 是
+     "等界面/桥稳定"的，不敢一刀切砍短：短了会变成偶发假红。）
+     拆开后 report 里的键（rep.multi / rep.dbFile）一个没变。 */
+  await phase("multi", 90000, async () => {
     await step("multi");
     setView("tree");
     selClear();
@@ -1416,17 +2217,43 @@ async function diagReport() {
 
     /* --- #3 多选：默认没有复选框 → 点「多选」才出现 --- */
     const mrep = {};
+    /* ⚠ 一开始就挂到 rep 上：mrep 是边测边填的，只在段尾赋值的话，
+       一段超时（哪怕是最后一条卡住）整个对象都是空的 —— 报出来只有
+       "某段超时"，连"卡在第几步"都没有。2026-10-13 就是被这个坑了一轮。 */
+    rep.multi = mrep;
     mrep.pickBefore = n("#tree input.pick");
     mrep.barBefore = getComputedStyle($("#bulkBar")).display;
     $("#treeMulti").click();
     await wait(400);
     mrep.pickAfter = n("#tree input.pick");
     mrep.barAfter = getComputedStyle($("#bulkBar")).display;
-    /* 批量条上该有的六颗按钮：改状态 / 改制作人 / 改截止日期 / 改备注 / 清空 / 退出
-       （2026-10-03 加了后两个：能批量改制作人，日期和备注没道理不行）。
+    /* 批量条上该有的七颗按钮：改状态 / 改制作人 / 改截止日期 / 改备注 / 删除 / 清空 / 退出
+       （2026-10-03 加了后两个：能批量改制作人，日期和备注没道理不行；
+        2026-10-10 加「删除」）。
        「全选本层」按用户要求撤掉了 —— 与其断言"某个不存在的元素不存在"（恒真、等于没测），
        不如把**实际有哪些按钮**采回来：既确认没多出全选，也能发现少了谁。 */
     mrep.bulkBtns = Array.from(document.querySelectorAll("#bulkBar button")).map((b) => b.textContent.trim());
+    /* 批量条最右边那颗必须是「退出多选」：破坏性的「删除」不能贴在边角，
+       手指划过去容易误触；而且它必须离「清空」远一点（两个都是"减法"按钮，
+       挨在一起点错就是删数据）。 */
+    mrep.bulkDelBtn = (() => {
+      const b = $("#bulkDel");
+      if (!b) return { found: false };
+      const bs = Array.from(document.querySelectorAll("#bulkBar button"));
+      const none = $("#bulkNone");
+      const exit = $("#bulkExit");
+      const box = (el) => el.getBoundingClientRect().left;
+      return {
+        found: true,
+        text: b.textContent.trim(),
+        cls: b.className,
+        color: getComputedStyle(b).color,
+        /* 顺序：删除 在 清空 左边、退出 在最右 */
+        delBeforeClear: box(b) < box(none),
+        exitRightmost: bs[bs.length - 1] === exit,
+        bar: bs.map((x) => x.textContent.trim()),
+      };
+    })();
 
     /* --- 批量条必须粘顶：树往下滑多远，它都留在内容区顶部 ---
        2026-10-03 用户报：多选后往下滑，批量条跟着滚出窗口，改个状态还得先滑回去。
@@ -1506,13 +2333,19 @@ async function diagReport() {
       const eb = $("#bulkExit").getBoundingClientRect();
       /* 这一步还没选任何东西 → 计数必须整段留白（写「还没选」是老毛病：占版面还要读一遍） */
       const cntTxt = ($("#bulkCnt") || { textContent: null }).textContent;
+      /* kids = 计数 span + 提示 span + 7 颗按钮 = 9
+         （2026-10-10 加「删除」之前是 8 —— 别再把数字写死在这儿，
+         改一次按钮要改两个地方：这里和 smoke_fin_gui 的按钮清单断言） */
+      const wantKids = 2 + Array.from(document.querySelectorAll("#bulkBar button")).length;
       mrep.barLayout = {
-        kids: kids.length, oneRow: oneRow, spread: spread,
+        kids: kids.length, wantKids: wantKids, oneRow: oneRow, spread: spread,
         sameRow: Math.abs(nb.top - eb.top) <= 2,
         exitRight: Math.round(eb.left) > Math.round(nb.left),
         cntWhenNone: cntTxt,
         hint: ($("#bulkHint") || {}).textContent,
-        ok: oneRow && kids.length === 8
+        /* 排布全在同一行 + 退出在清空右边 + 计数留白。
+           kids 用"实际按钮数 + 2"推 —— 加按钮时这条不会假红。 */
+        ok: oneRow && kids.length === wantKids
             && Math.abs(nb.top - eb.top) <= 2
             && Math.round(eb.left) > Math.round(nb.left)
             && cntTxt === "",
@@ -1578,41 +2411,55 @@ async function diagReport() {
               && r0.classList.contains("picked"),
         };
 
-        /* ② 直接点第二条 = **单选**：第一条必须让位。
-           以前这里是"叠加"，用户 2026-10-02 报的就是这个
-           （"不按任何键时应当单选，现在是加减选模式"）。 */
+        /* ② **不按任何键直接点 = 加选**（用户 2026-10-10 定的）。
+           历史来回走了两趟，别再搞反：
+             * 最初是"取反" → 累加，用户报「现在是加减选模式」；
+             * 2026-10-02 改成"先清空再选"（真单选）；
+             * 2026-10-10 用户又要求回到加选 —— 现在的口径是
+               「无修饰键 = 加选、Shift = 范围选」，两种键各管一头。
+           所以这里钉的是：第一条**还在**，第二条也进了集合。 */
         realClick(c1);
         await wait(250);
-        const tree1 = selfAndDescendants(findNode(id1)).map(Number);
         mrep.pickClick2 = {
           id: id1,
-          firstGone: !selNodes.has(id0),
-          firstUnchecked: c0.checked === false,
+          firstKept: selNodes.has(id0),
+          firstStillChecked: c0.checked === true,
           secondInSet: selNodes.has(id1),
           secondChecked: c1.checked === true,
-          onlySecond: Array.from(selNodes).every((i) => tree1.includes(Number(i))),
-          ok: !selNodes.has(id0) && c0.checked === false
-              && selNodes.has(id1) && c1.checked === true
-              && Array.from(selNodes).every((i) => tree1.includes(Number(i))),
+          bothIn: selNodes.has(id0) && selNodes.has(id1),
+          ok: selNodes.has(id0) && c0.checked === true
+              && selNodes.has(id1) && c1.checked === true,
         };
 
-        /* ③ 再点同一条 → 取消（连点两次等于没选，不用特意按 Ctrl） */
+        /* ③ 再点同一条 → **只撤它自己**（加选的对称操作）。
+           这时候 c0 还选着，所以"选择集清空"是错的 ——
+           钉的是"点谁撤谁、别人不动"。 */
         realClick(c1);
         await wait(250);
         mrep.pickClick3 = {
-          empty: selCount() === 0, unchecked: c1.checked === false,
-          ok: selCount() === 0 && c1.checked === false,
+          secondGone: !selNodes.has(id1),
+          secondUnchecked: c1.checked === false,
+          firstKept: selNodes.has(id0),
+          firstStillChecked: c0.checked === true,
+          ok: !selNodes.has(id1) && c1.checked === false
+              && selNodes.has(id0) && c0.checked === true,
         };
 
-        /* ④ Ctrl 加选仍然叠加 */
-        realClick(c0); await wait(200);
+        /* ④ Ctrl 加选仍然叠加（跟无修饰键现在是同一个效果，但键位得各测一遍）
+           ⚠ 必须先 selClear()：③ 结束时 c0 还选着，直接 realClick(c0)
+           会把它**取消**掉（加选的本质是取反），beforeCtrl 就落成 0 了 ——
+           2026-10-10 改语义时就是这么红了一条。 */
+        selClear(); repaintSelection(); syncBulkBar();
+        await wait(150);
+        realClick(c0); await wait(250);
         const beforeCtrl = selCount();
         realClick(c1, { ctrlKey: true });
         await wait(250);
         mrep.pickCtrl = {
           before: beforeCtrl, after: selCount(),
           bothIn: selNodes.has(id0) && selNodes.has(id1),
-          ok: selCount() > beforeCtrl && selNodes.has(id0) && selNodes.has(id1),
+          ok: beforeCtrl >= 1 && selCount() > beforeCtrl
+              && selNodes.has(id0) && selNodes.has(id1),
         };
 
         /* ⑤ **Shift 点复选框**也要能范围选 —— 老 bug：只有点"整行"才认 Shift，
@@ -1672,8 +2519,10 @@ async function diagReport() {
       const kidRow = nodeRow(kid.id);
       mrep.partial = { kidId: Number(kid.id), kidRow: !!kidRow };
       if (kidRow) {
-        /* ⚠ **必须 Ctrl 点**才是"减选"。2026-10-02 起直接点 = 单选
-           （再写 `kidRow.click()` 就变成"只选中这个子项"，跟以前语义不一样了）。 */
+        /* 减选一条：`selOne` 是"按显示态取反"，所以对**已选中**的子项
+           再点一下就是把它撤掉。这里用 Ctrl 点表达"我是在做加减选"，
+           语义上跟无修饰键点击（2026-10-10 起也是加选/撤选）等价 ——
+           钉的是"减选后父项要跟着变未勾"，不是键位本身。 */
         kidRow.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
         await wait(300);
         const pRow2 = nodeRow(pNode.id);
@@ -1831,7 +2680,9 @@ async function diagReport() {
     mrep.statOk = ids.length > 0 && ids.every((i) => statOf(i) === "反馈");
     mrep.afterStat = ids.map(statOf);
 
-    /* 真改制作人：挑菜单里第一个具体的人名（跳过「清空」「手输」） */
+    /* 真改制作人：挑菜单里第一个具体的人名（跳过「清空」「新建一个外包商…」）。
+       ⚠ 候选行的文案是「名字 + （团队）」，而落库后读回来的是**纯名字** ——
+       不剥掉后缀，这条会一直红着，而且看着像"批量改没生效"。 */
     selClear();
     await reload(); await wait(500);
     const pk2 = Array.from(document.querySelectorAll("#tree input.pick")).slice(0, 2);
@@ -1845,8 +2696,10 @@ async function diagReport() {
     const pop2 = document.querySelector(".popup");
     const it2 = pop2 && Array.from(pop2.children).find(
       (d) => d.textContent && d.textContent.indexOf("清空") < 0
-             && d.textContent.indexOf("手输") < 0);
+             && d.textContent.indexOf("新建一个外包商") < 0);
     mrep.artistPick = it2 ? it2.textContent : null;
+    const pickName = (mrep.artistPick || "").replace(/（团队）$/, "");
+    mrep.artistName = pickName;
     if (it2) { it2.click(); await wait(1400); }
     const d3 = await call("load");
     const artistOf = (i) => {
@@ -1860,12 +2713,13 @@ async function diagReport() {
       }));
       return hit;
     };
-    mrep.artistOk = mrep.artistPick && selCount() >= 0
-      && Array.from(selNodes).every((i) => artistOf(i) === mrep.artistPick);
+    mrep.artistOk = !!mrep.artistPick && selCount() >= 0
+      && Array.from(selNodes).every((i) => artistOf(i) === pickName);
 
     /* --- 2026-10-02 需求③：多选后改**任意一条选中项**的状态 / 制作人，
            其它选中项一起改（以前只有批量条上那两个按钮能改一批） --- */
     selClear(); await reload(); await wait(500);
+    mrep.snapIn = treeSnap();
     {
       const rows3 = Array.from(document.querySelectorAll("#tree .row"))
         .filter((el) => el.querySelector(".pick"));
@@ -1915,10 +2769,12 @@ async function diagReport() {
         ra.querySelector(".badge.st").click();
         await wait(350);
         /* 2026-10-03 用户报的 bug：**点状态徽章时选择集被清空**。
-           徽章那一下会冒泡到整行，被 multiClick 当成「直接点 = 单选」→
+           徽章那一下会冒泡到整行，被 multiClick 当成"一次选择点击"→
            选择集只剩这一条；而 ids 是冒泡前就抓好的（多条），于是出现
            "确实改了一批、屏幕上却只剩一个勾着"。徽章里补了 stopPropagation，
-           这里钉住：菜单还开着的时候，选择集必须还是原来那几条。 */
+           这里钉住：菜单还开着的时候，选择集必须还是原来那几条。
+           （无修饰键点击的语义 2026-10-10 从"单选"改成了"加选"，
+           这条断言两种语义下都成立 —— 它要的是"没被改掉"，不是"被清空"。） */
         mrep.rowStatKeep = {
           sel: selCount(), want: idsRow.length,
           ok: idsRow.length >= 2 && selCount() === idsRow.length,
@@ -1943,16 +2799,21 @@ async function diagReport() {
         /* ② 改制作人：直接点行上那块「制作人 X」。
            两步准备，让断言不至于"本来就成立"：
              a) 先给 ra 一个制作人 → 行上才会渲染出 `.meta.who`（没制作人的行不画这块）；
-             b) 再拿一个**不在本次选择里**的环节写上候选值「甲」→ 菜单里有得挑，
-                而且这个值是别人都没有的，选中项被改成它就一定是真改动。
+             b) 菜单里的候选现在来自**外包商名录**（全局的，2026-10-16 起强关联），
+                不再依赖"库里已经有人用过这个名字"。所以现造两条临时条目 ——
+                跑完这一段立刻删掉，别给后面的外包商断言留游离条目。
            另外 ⋯ 菜单那条路仍然要试（`via` 会记下来），两条路都得通。 */
         const others3 = Array.from(document.querySelectorAll("#tree .row"))
           .filter((el) => el.querySelector(".pick"))
           .map((el) => Number(el.dataset.id))
           .filter((i) => i !== ia && i !== ib);
-        await call("set_field", "node", ia, "artist", "甲原始人");
-        if (others3.length) await call("set_field", "node", others3[0], "artist", "甲");
+        const vOld = await call("vendor_save", 0, { name: "甲原始人" });
+        const vPick = await call("vendor_save", 0, { name: "甲" });
+        mrep.vOldId = (vOld || {}).id || 0;
+        mrep.vPickId = (vPick || {}).id || 0;
+        await call("set_field", "node", ia, "artist_id", mrep.vOldId);
         await reload(); await wait(500);
+        let idsA = [];
         const ra2 = nodeRow(ia), rb2 = nodeRow(ib);
         mrep.rowArtist = { has: !!(ra2 && rb2) };
         if (ra2 && rb2) {
@@ -1960,7 +2821,7 @@ async function diagReport() {
           ra2.click(); await wait(200);
           rb2.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
           await wait(300);
-          const idsA = Array.from(selNodes);
+          idsA = Array.from(selNodes);
           const whoAfter0 = await readBy((x) => x.artist)();
           const beforeA = idsA.map(whoAfter0);
           const whoEl = ra2.querySelector(".meta.who");
@@ -1978,9 +2839,14 @@ async function diagReport() {
           }
           await wait(350);
           const popA = document.querySelector(".popup");
-          /* 挑「甲」这个候选（跳过「清空制作人」「手输一个…」） */
+          /* 挑「甲」这个候选（跳过「未分配（清空）」「新建一个外包商…」）。
+             ⚠ 候选行现在是「✓ 名字」/「　名字」，trim 会把全角空格一起去掉
+             （U+3000 属于空格类，String.trim 认它）。 */
+          mrep.menuA = popA ? Array.from(popA.children).map((d) => d.textContent) : null;
           const itA = popA ? Array.from(popA.children).find(
             (d) => d.textContent && d.textContent.trim() === "甲") : null;
+          mrep.hasNewVendor = !!(popA && Array.from(popA.children).some(
+            (d) => (d.textContent || "").indexOf("新建一个外包商") >= 0));
           if (itA) { itA.click(); await wait(1500); }
           await reload(); await wait(400);
           const whoAfter = await readBy((x) => x.artist)();
@@ -1995,6 +2861,16 @@ async function diagReport() {
           mrep.rowArtist.ok = !!itA && idsA.length >= 2
             && gotA.every((v) => v === "甲")
             && othersA.some((i) => beforeA[idsA.indexOf(i)] !== "甲");
+        }
+        /* 收拾：把这一段现造的两个外包商带走。
+           先把挂上去的清掉 —— 还有环节挂着的话会被"还有 N 个环节"拦下。 */
+        {
+          const touched = Array.from(new Set([ia].concat(idsA)));
+          for (const i of touched) await call("set_field", "node", i, "artist_id", 0);
+          if (mrep.vOldId) await call("vendor_delete", mrep.vOldId);
+          if (mrep.vPickId) await call("vendor_delete", mrep.vPickId);
+          mrep.vendorsCleaned = !((await call("load", 1)).vendors || [])
+            .some((v) => v.name === "甲" || v.name === "甲原始人");
         }
 
         /* ③④ 截止日期 / 备注：跟制作人**完全同构**，所以抽一段共用流程。
@@ -2012,7 +2888,11 @@ async function diagReport() {
           await reload(); await wait(400);
           const r1 = nodeRow(ia), r2 = nodeRow(ib);
           out.has = !!(r1 && r2);
-          if (!r1 || !r2) return out;
+          out.snapIn = treeSnap();      // 每步开工时的树形态（哪一步开始变的一眼可见）
+          if (!r1 || !r2) {
+            out.miss = { ia: ia, ib: ib, r1: !!r1, r2: !!r2, snap: treeSnap() };
+            return out;
+          }
           out.inMenu = fieldValues(field).indexOf(pickValue) >= 0;
           selClear(); repaintSelection(); syncBulkBar(); await wait(150);
           r1.click(); await wait(200);
@@ -2057,6 +2937,80 @@ async function diagReport() {
     }
     selClear(); repaintSelection(); syncBulkBar(); await wait(150);
 
+    /* --- #3c 批量删除（2026-10-10）---
+       跟单条删除一样，**必须真点按钮**，不能直调 call("bulk_delete")：
+       否则"按钮没绑上 / 确认框没弹 / 计数报错"这类问题又全靠肉眼。
+       样本自己建（一条父 + 两个子，故意让勾父项就级联带走子项），
+       专门用来验「确认框说的条数」和「后端真删了几条」对得上。 */
+    {
+      const drepDel = {};
+      const prjDel = ((D.groups.find((g) => g.key === "commercial") || {}).projects || [])
+        .map((p) => p.id)[0];
+      const mkP = await call("add_node", prjDel, null, "批删样本父");
+      const pid = mkP && mkP.id;
+      const mkC1 = pid ? await call("add_node", prjDel, pid, "批删样本子1") : null;
+      const mkC2 = pid ? await call("add_node", prjDel, pid, "批删样本子2") : null;
+      await reload();
+      await wait(400);
+      drepDel.made = !!(pid && mkC1 && mkC1.ok && mkC2 && mkC2.ok);
+      drepDel.snapIn = treeSnap();
+
+      if (drepDel.made) {
+        /* 勾父项 → 级联带上两个子项，选择集 3 条 */
+        const prow = nodeRow(Number(pid));
+        drepDel.rowFound = !!prow && !!prow.querySelector(".pick");
+        if (!drepDel.rowFound) drepDel.miss = { pid: pid, snap: treeSnap() };
+        if (drepDel.rowFound) {
+          selClear();
+          prow.querySelector(".pick").dispatchEvent(
+            new MouseEvent("click", { bubbles: true, cancelable: true }));
+          await wait(300);
+          drepDel.sel = selCount();
+          /* 后端算的"会删掉几条"：叶子是 3（父+2子），
+             但祖先已进集合，所以根只有 1 个 —— 界面上说的是选中数 */
+          drepDel.descendants = descendantsCountFor(Array.from(selNodes));
+
+          /* confirm 换成替身：原生弹窗会卡死 JS 线程、收尾的 boot_ok 就发不出去 */
+          const realConfirm = window.confirm, realErr = window.__err;
+          let asked = 0, askedMsg = "";
+          window.confirm = (m) => { asked++; askedMsg = String(m || ""); return true; };
+          try {
+            $("#bulkDel").click();
+            await wait(900);                    // 等跨桥往返 + reload
+          } finally {
+            window.confirm = realConfirm;
+            window.__err = realErr;
+          }
+          drepDel.asked = asked;
+          drepDel.askedMsg = askedMsg;
+          drepDel.errAfter = null;             // 下面从 DOM 复核，不靠 __err
+
+          /* 复核：三个环节都该从库里没了 */
+          const after = await call("load");
+          const gone = (pid) => {
+            for (const g of after.groups || []) {
+              for (const p of g.projects || []) {
+                const walk = (arr) => (arr || []).some(
+                  (x) => Number(x.id) === Number(pid) || walk(x.children));
+                if (walk(p.children)) return false;
+              }
+            }
+            return true;
+          };
+          drepDel.parentGone = gone(pid);
+          drepDel.kid1Gone = gone(mkC1.id);
+          drepDel.kid2Gone = gone(mkC2.id);
+          /* 删完选择集要清空、批量条不能挂着幽灵计数 */
+          drepDel.selAfter = selCount();
+          drepDel.cntAfter = ($("#bulkCnt") || {}).textContent || "";
+          drepDel.ok = asked === 1 && drepDel.parentGone
+            && drepDel.kid1Gone && drepDel.kid2Gone && selCount() === 0;
+        }
+      }
+      mrep.bulkDel = drepDel;
+      selClear(); repaintSelection(); syncBulkBar(); await wait(150);
+    }
+
     /* 「清空」全部取消；「退出多选」复选框消失 */
     $("#bulkNone").click(); await wait(300);
     mrep.none = selCount();
@@ -2065,8 +3019,15 @@ async function diagReport() {
     mrep.barGone = getComputedStyle($("#bulkBar")).display;
     rep.multi = mrep;
 
+  });
+
+  /* --- #6 数据文件 / 多机开关：只验接口与校验，不真重启（2026-10-13 从 multi 里拆出来）---
+     原本它跟多选共用一个 30 秒预算，两者都偏重，实测就顶着预算超时。 */
+  await phase("files", 30000, async () => {
+    await step("files");
     /* --- #6 数据文件：面板上要能改（不真重启，只验接口与校验） --- */
     const drep = {};
+    rep.dbFile = drep;
     const info = await call("db_info");
     drep.from = info.from;
     drep.pathOk = !!info.path;
@@ -2122,8 +3083,12 @@ async function diagReport() {
          顺带验"有值时自绘占位必须让位"—— 那个 YYYY/MM/DD 只在空值时顶在框里
          （有值时原生自己画的 2026/12/31 正是要的格式，不能拿占位去盖）。 */
       $("#newDl").value = "2026-12-31";
-      syncDl();
+      syncDph($("#newDl"));
       const duePhWithVal = getComputedStyle($("#newDlPh")).display;
+      /* 结款日期（2026-10-13 新增）走同一套：填了就得落库、占位要让位 */
+      $("#newSettle").value = "2027-01-15";
+      syncDph($("#newSettle"));
+      const settlePhWithVal = getComputedStyle($("#newSettlePh")).display;
       $("#newOk").click();
       await wait(2200);
       const f2 = await call("finance_data", 0, 0, "CNY");
@@ -2141,14 +3106,23 @@ async function diagReport() {
       rep.create.dueIn = "2026-12-31";
       rep.create.dueStored = pDl ? pDl.deadline : null;
       rep.create.duePhWithVal = duePhWithVal;
+      /* 结款日期也得真落库 —— 只在新建页填了、没写进去的话，行上永远不报结款逾期，
+         而这种"少发一条 set_field"的问题肉眼根本看不出来 */
+      rep.create.settleIn = "2027-01-15";
+      rep.create.settleStored = pDl ? pDl.settle_date : null;
+      rep.create.settlePhWithVal = settlePhWithVal;
 
       /* 原生 date 框**天然写不进非法日期**：塞「下周三」「2026/12/31」进去 value 都会变成
          空串（只有 ISO 收得下）。所以手写框那套"格式写错就拦下"的校验连同 normDay 一起删了 ——
          这种失败在原生框上根本发生不了。
-         顺带：重开弹窗后自绘占位该回来（openNewDialog 里 value="" + syncDl()）。 */
+         顺带：重开弹窗后自绘占位该回来（openNewDialog 里 value="" + syncDph()）。 */
       openNewDialog();
       await wait(200);
       rep.create.duePhBack = getComputedStyle($("#newDlPh")).display;
+      /* 上一个项目的结款日期不能留在框里 —— 新建页 reset 漏清这一个，
+         下个项目就会莫名其妙带上前一个的结款日 */
+      rep.create.settlePhBack = getComputedStyle($("#newSettlePh")).display;
+      rep.create.settleLeft = $("#newSettle").value || "";
       const badEl = $("#newDl");
       badEl.value = "下周三"; rep.create.rejectCn = badEl.value;
       badEl.value = "2026/12/31"; rep.create.rejectSlash = badEl.value;
@@ -2287,6 +3261,406 @@ async function diagReport() {
       window.alert = realAlert;
     }
     rep.clients = crep;
+  });
+
+  /* 外包商 / 制作人名录（2026-10-16）。跟客户并排、同一套形态，所以自检也照着写。
+     净增/净减为 0（自己造一个、再删掉），不影响前面 create 阶段的客户计数。
+     ⚠ 三条都真点按钮 / 真落库：
+       ① 列表面板的 ⋯ 菜单（编辑 / 删除）—— 只有真点才测得出"菜单没接上"；
+       ② 项目设置页填一个新名字 → ensureVendor **现建现挂** ——
+          这是本轮最容易假绿的一处（界面看着有名字，库里可能还是个空 id）；
+       ③ 「记一笔」选到「外包支出」时，外包商行要出现、且空着不给存。 */
+  await phase("vendor", 25000, async () => {
+    await step("vendor");
+    const vr = {};
+    const errBefore = window.__err;
+    /* 原生 confirm/alert 会卡住 JS 线程，收尾的 boot_ok 就永远发不出去 */
+    const realConfirm = window.confirm, realAlert = window.alert;
+    window.confirm = () => true;
+    window.alert = (m) => { window.__alertVdr = String(m); };
+    try {
+      const vlist = async () => ((await call("load", 1)).vendors || []);
+      const pickRow = (name) => Array.from($("#vdrList").querySelectorAll("[data-vdr]"))
+        .find((el) => {
+          const nm = el.parentElement.querySelector(".nm");
+          return nm && nm.textContent === name;
+        });
+      /* ⚠ 每次都**按名字重捞**行再点：删/存之后列表整块重画，
+         拿旧引用点一下是点了个脱离 DOM 的快照（菜单不弹，看着像"没反应"）。 */
+      const menuOf = async (name) => {
+        const r = pickRow(name);
+        if (!r) return null;
+        r.click();
+        await wait(220);
+        const pop = document.querySelector(".popup");
+        return pop ? Array.from(pop.children) : null;
+      };
+      const item = (kids, txt) => (kids || []).find((d) => d.textContent === txt);
+      /* 用真的 input 事件改金额 —— 直接设 value 不触发 syncFinNet 那些绑定 */
+      const fire = (sel, v) => {
+        const el = $(sel);
+        el.value = v;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+
+      /* 冒昧先记两个只读事实：种子里的三个外包商在不在、备选里有没有 */
+      vr.seeded = (await vlist()).map((v) => v.name);
+      vr.optsHasSeed = Array.from(document.querySelectorAll("#vendorOpts option"))
+        .map((o) => o.value);
+
+      /* ① 造一个没人挂靠的外包商，专门拿来删（vid 传 0 = 新建） */
+      const mk = await call("vendor_save", 0, { name: "冒烟待删外包商", kind: "团队" });
+      vr.made = !!(mk && mk.ok);
+      const throwId = (mk || {}).id || 0;
+      await loadFinance();
+
+      /* ② 点财务页头那颗「外包商」（不是直调函数）→ 面板要开、列表要有行 */
+      $("#finVendorsBtn").click();
+      await wait(320);
+      vr.opened = getComputedStyle($("#ovVendor")).display !== "none";
+      vr.ops = document.querySelectorAll("#vdrList [data-vdr]").length;
+      vr.rows = document.querySelectorAll("#vdrList .ftrow.body").length;
+      vr.head = Array.from(document.querySelectorAll("#vdrList .ftrow.head > div"))
+        .map((e) => e.textContent);
+      /* 「挂靠」那列 2026-10-16 起**只显示挂靠项目数**（用户要求精简，去掉「N 环节 · K 笔款」）。
+         ⚠ 显示精简了删除保护没松：后端 vendor_delete 仍盯项目 / 环节 / 款项三处。
+         ⚠ pickRow 返回的是那颗 `⋯`（`[data-vdr]`），不是整行 ——
+         要取第 3 个格子得先 parentElement 回到行上（直接 `r.children[2]` 永远是空，
+         而症状只是"这条断言红着"，看着像挂靠数列没画）。 */
+      const rowCells = () => Array.from(document.querySelectorAll("#vdrList .ftrow.body"))
+        .map((r) => Array.from(r.children).map((c) => c.textContent));
+      vr.listCells = rowCells();
+      vr.hangCells = rowCells().map((c) => c[2]);       // 每行第 3 格（整列）
+      /* 挂了项目的那个（冒烟制作人 →「1 项目」） */
+      vr.hangCell = (() => {
+        const r = pickRow("冒烟制作人");
+        const row = r ? r.parentElement : null;
+        return row && row.children[2] ? row.children[2].textContent : null;
+      })();
+      /* 兜底口径：万一按名字捞不着，直接从行数组里找那一行（下次红的时候能看出
+         "是没渲染出来" 还是 "名字对不上"）。 */
+      vr.hangCell2 = (() => {
+        const row = rowCells().find((c) => c[0] === "冒烟制作人");
+        return row ? row[2] : null;
+      })();
+      /* 0 项目的那个（冒烟工作室有 2 笔款、没挂项目）→ 现在是「—」，
+         正好证明「笔款 / 环节」不再混进这一列。 */
+      vr.hangCellNone = (() => {
+        const row = rowCells().find((c) => c[0] === "冒烟工作室");
+        return row ? row[2] : null;
+      })();
+
+      /* ③ ⋯ 菜单：编辑 / 删除都要在，删除必须染红 */
+      const kids = await menuOf("冒烟待删外包商");
+      vr.rowFound = !!pickRow("冒烟待删外包商");
+      vr.menu = kids ? kids.map((d) => d.textContent) : null;
+      vr.hasEdit = !!item(kids, "编辑外包商");
+      vr.hasDel = !!item(kids, "删除外包商");
+      vr.popZ = (() => {
+        const pp = document.querySelector(".popup");
+        return pp ? parseInt(getComputedStyle(pp).zIndex, 10) : 0;
+      })();
+      const dEl = item(kids, "删除外包商"), eEl = item(kids, "编辑外包商");
+      vr.delColor = dEl ? getComputedStyle(dEl).color : "";
+      const _rgb = (vr.delColor.match(/\d+/g) || [0, 0, 0]).map(Number);
+      vr.delRed = !!dEl && !!eEl && vr.delColor !== getComputedStyle(eEl).color
+        && _rgb[0] > _rgb[1] && _rgb[0] > _rgb[2];
+
+      /* ④ 「编辑外包商」→ 四栏回填、按钮文案变「更新」、两档能切 */
+      const ed = item(kids, "编辑外包商");
+      if (ed) { ed.click(); await wait(280); }
+      vr.nameFilled = $("#vdrName").value;
+      vr.kindFilled = (document.querySelector("#vdrKind button.act") || { dataset: {} }).dataset.k;
+      vr.saveTxt = $("#vdrSave").textContent;
+      vr.contactFilled = $("#vdrContact").value;
+      vr.noteFilled = $("#vdrNote").value;
+      /* 另挑一个有联系方式的（冒烟工作室写了 wx:smoke），确认那两栏也真回填 */
+      const kidsW = await menuOf("冒烟工作室");
+      const edW = item(kidsW, "编辑外包商");
+      if (edW) { edW.click(); await wait(280); }
+      vr.contactW = $("#vdrContact").value;
+      vr.noteW = $("#vdrNote").value;
+      /* 类型只有两档：点「个人」得能换过去 */
+      const kb = document.querySelector('#vdrKind button[data-k="个人"]');
+      if (kb) { kb.click(); await wait(150); }
+      vr.kindSwitch = (document.querySelector("#vdrKind button.act") || { dataset: {} }).dataset.k;
+      /* ⚠ 刚把冒烟工作室点成「个人」了但**没点保存** ——
+         不改回来会让⑤之后的断言以为它还是团队。清一下表单即可。 */
+      $("#vdrReset").click();
+      await wait(150);
+      vr.resetCleared = $("#vdrName").value === "" && $("#vdrSave").textContent === "保存外包商";
+
+      /* ⑤ 改个名字：列表要刷新、库里要变，而**挂靠关系不能断**
+             （改名断关联 = 关联白做，正是本轮改动最该防的那个坑）。
+         ⚠ 先自己挂一处上去 —— 前面的多选阶段把环节的制作人都清空了，
+           靠种子里那一处去捞会捞到空（而且"捞不到"会伪装成"改名断了关联"）。
+           这里挂在**项目**上：项目行永远画着，`artist` 名字看得见。 */
+      const xg = (await vlist()).find((v) => v.name === "冒烟小工") || {};
+      vr.xgId = xg.id || 0;
+      const flatP = async () => (await call("load", 1)).groups
+        .reduce((a, g) => a.concat(g.projects), []);
+      const prjId = ((await flatP())[0] || {}).id || 0;
+      vr.prjId = prjId;
+      if (prjId && vr.xgId) {
+        await call("set_field", "project", prjId, "artist_id", vr.xgId);
+        await reload(); await wait(400);
+      }
+      const p0 = (await flatP()).find((p) => Number(p.id) === Number(prjId)) || {};
+      vr.nodeBeforeId = p0.artist_id || 0;
+      vr.nodeBeforeName = p0.artist || null;
+
+      const kids2 = await menuOf("冒烟小工");
+      const ed2 = item(kids2, "编辑外包商");
+      if (ed2) { ed2.click(); await wait(280); }
+      $("#vdrName").value = "冒烟小工V2";
+      $("#vdrSave").click();
+      await wait(1500);
+      const vl2 = await vlist();
+      vr.renamed = vl2.some((v) => v.name === "冒烟小工V2")
+        && !vl2.some((v) => v.name === "冒烟小工");
+      vr.renameKeptId = (vl2.find((v) => v.name === "冒烟小工V2") || {}).id || 0;
+      vr.renameSameId = vr.renameKeptId === vr.nodeBeforeId;
+      /* 项目行上的「制作人」也要跟着改（保存后没有 reload 就会留着旧名） */
+      const p1 = (await flatP()).find((p) => Number(p.id) === Number(prjId)) || {};
+      vr.renameTreeName = p1.artist || null;
+      vr.renameKeptLink = (p1.artist_id || 0) === (p0.artist_id || 0);
+      vr.renameRowTxt = (() => {
+        const r = document.querySelector(
+          '#tree .row[data-kind="project"][data-id="' + Number(prjId) + '"]');
+        const w = r ? r.querySelector(".meta.who") : null;
+        return w ? w.textContent : null;
+      })();
+      vr.dlgStillOpen = getComputedStyle($("#ovVendor")).display !== "none";
+
+      /* ⑥ 删除保护：还有外包支出挂着的删不掉，原因要说到点上 */
+      window.__alertVdr = null;
+      const kids3 = await menuOf("冒烟工作室");
+      const del3 = item(kids3, "删除外包商");
+      vr.busyHasDel = !!del3;
+      if (del3) { del3.click(); await wait(900); }
+      vr.busyMsg = window.__alertVdr;
+      vr.busyBlocked = !!window.__alertVdr && /外包支出/.test(window.__alertVdr);
+      vr.busyStill = (await vlist()).some((v) => v.name === "冒烟工作室");
+
+      /* ⑦ 删得掉的那个：从列表消失、表单清空、没有报错弹窗 */
+      window.__alertVdr = null;
+      const kids4 = await menuOf("冒烟待删外包商");
+      const del4 = item(kids4, "删除外包商");
+      if (del4) { del4.click(); await wait(900); }
+      vr.deleted = !(await vlist()).some((v) => v.name === "冒烟待删外包商");
+      vr.delAlert = window.__alertVdr;
+      vr.formCleared = $("#vdrName").value === "";
+      modal("#ovVendor", false);
+      await wait(150);
+
+      /* ⑧ 「记一笔」：外包商行只跟「外包支出」绑在一起。
+            原来"打开弹窗"和"切类型"两处各写了一遍显隐，加这行必然漏一处 ——
+            所以这里把三个类型都切一遍。 */
+      openFinDialog(null);
+      await wait(500);
+      const vis = () => getComputedStyle($("#finVendorRow")).display !== "none";
+      vr.vdrRowOnPayment = vis();
+      document.querySelector('#finKind button[data-k="outsource"]').click();
+      await wait(200);
+      vr.vdrRowOnOutsource = vis();
+      document.querySelector('#finKind button[data-k="invoice"]').click();
+      await wait(200);
+      vr.vdrRowOnInvoice = vis();
+      document.querySelector('#finKind button[data-k="outsource"]').click();
+      await wait(200);
+      vr.vdrRowBack = vis();
+
+      /* ⑨ 空着不给存：提示要出现、弹窗不关、库里也不能多出记录 */
+      const recsBefore = ((await call("finance_data", 0, 0, "CNY")).records || []).length;
+      fire("#finAmount", "777");
+      $("#finVendor").value = "";
+      $("#finOk").click();
+      await wait(700);
+      vr.emptyToast = ($("#toast") || {}).textContent || "";
+      vr.emptyKept = getComputedStyle($("#ovFin")).display !== "none";
+      vr.emptyNoRec = ((await call("finance_data", 0, 0, "CNY")).records || []).length === recsBefore;
+
+      /* ⑩ 框里填一个**名录里没有的**新名字 → 前端现建条目再挂上去。
+             这条是「记一笔」侧的 ensureVendor，和项目设置页那条是同一段逻辑，
+             但入口不同、值来源不同（一个是名字框、一个是 datalist），都得真跑一次。
+             状态改成「应付」：验的是"刚记下的欠款立刻进汇总的应付那一列"
+             （种子里那笔 5000 应付是直接写库的，没走界面）。 */
+      $("#finVendor").value = "冒烟外协新人";
+      $("#finStatus").value = "应付";
+      $("#finOk").click();
+      await wait(1800);
+      vr.newMade = (await vlist()).some((v) => v.name === "冒烟外协新人");
+      const fd = await call("finance_data", 0, 0, "CNY");
+      /* ⚠ 按**名字**找我们刚记的那笔，不按 kind 取第一条 ——
+         种子里还有两笔挂在「冒烟工作室」名下的，取第一条会断言到别人头上。 */
+      const nrec = (fd.records || []).find((r) => r.vendor === "冒烟外协新人") || null;
+      vr.newGot = !!nrec;
+      vr.newLinked = !!nrec && nrec.vendor_kind === "个人";
+      vr.newAmount = nrec ? nrec.amount : null;
+      vr.newStatus = nrec ? nrec.status : null;
+      /* ⑪ 汇总口径：这个新人名下一笔「应付 777」→ 已付 0 / 应付 777 / 合计 777 */
+      const vsum = (fd.vendor_summary || []).find((v) => v.vendor === "冒烟外协新人") || {};
+      vr.sumPaid = vsum.paid;
+      vr.sumPending = vsum.pending;
+      vr.sumTotal = vsum.total;
+      vr.sumCount = vsum.count;
+      vr.sumProjects = vsum.projects;
+      /* 种子里那两笔（同一团队：一笔已付 20000 + 一笔应付 5000）必须合成**一行** */
+      const vSeed = (fd.vendor_summary || []).find((v) => v.vendor === "冒烟工作室") || {};
+      vr.seedPaid = vSeed.paid;
+      vr.seedPending = vSeed.pending;
+      vr.seedCount = vSeed.count;
+
+      /* 收拾：把样本记录和样本外包商都带走 */
+      if (nrec) { await call("finance_delete", nrec.id); }
+      const nv = (await vlist()).find((v) => v.name === "冒烟外协新人");
+      if (nv) { await call("vendor_delete", nv.id); }
+      /* 冒烟小工改回去，别给后面留一个改了名的样本 */
+      const cur = (await vlist()).find((v) => v.name === "冒烟小工V2");
+      if (cur) { await call("vendor_save", cur.id, { name: "冒烟小工", kind: "个人" }); }
+      /* 把项目上的制作人还回种子那个（⑤ 里借用了它） */
+      const zb = (await vlist()).find((v) => v.name === "冒烟制作人");
+      if (prjId && zb) await call("set_field", "project", prjId, "artist_id", zb.id);
+      await reload();
+      await wait(300);
+      const vlEnd = await vlist();
+      vr.cleaned = !vlEnd.some((v) => ["冒烟外协新人", "冒烟小工V2", "冒烟待删外包商"]
+        .includes(v.name));
+      /* 收尾时名录必须回到种子那三个（多一个少一个都是收拾没干净） */
+      vr.backTo = vlEnd.map((v) => v.name).sort();
+      vr.errNew = window.__err === errBefore ? null : window.__err;
+    } finally {
+      window.confirm = realConfirm;
+      window.alert = realAlert;
+    }
+    rep.vendor = vr;
+  });
+
+  /* 日期选择弹窗（2026-10-16 新增）：环节 ⋯ 菜单的「编辑截止日期」从 prompt 手输
+     换成**日历控件**（原生 date 框）。
+     ⚠ 必须走真实入口（⋯ → 编辑截止日期）并**真点保存**、再回查库 ——
+        只断言"弹窗画出来了"是假绿：2026-10-10 那个删除按钮绑了 ReferenceError，
+        弹窗照样画、点了没反应，一路绿灯。 */
+  await phase("date", 20000, async () => {
+    await step("date");
+    const dp = {};
+    const errBefore = window.__err;
+    const grp = D.groups.find((g) => (g.projects || []).length) || D.groups[0] || {};
+    const p0 = (grp.projects || [])[0] || {};
+    const mk = p0.id ? await call("add_node", p0.id, null, "日期弹窗样本") : null;
+    dp.made = !!(mk && mk.id);
+    if (!dp.made) { rep.date = dp; return; }
+    const nid = Number(mk.id);
+    await reload(); await wait(500);
+    dp.snapIn = treeSnap();
+
+    const readDl = async () => {
+      const d = await call("load");
+      let h = null;
+      (d.groups || []).forEach((g) => (g.projects || []).forEach((p) => {
+        const w = (arr) => (arr || []).forEach((x) => {
+          if (Number(x.id) === nid) h = x.deadline || "";
+          w(x.children);
+        });
+        w(p.children);
+      }));
+      return h;
+    };
+    dp.before = await readDl();
+
+    /* 真点 ⋯ 菜单里那一条 —— 不是直调 openDateDialog（那测的是函数不是绑定） */
+    const openViaMenu = async () => {
+      const row = nodeRow(nid);
+      if (!row) { dp.miss = { nid: nid, snap: treeSnap() }; return false; }
+      const more = row.querySelector(".mini.more");
+      dp.hasMore = !!more;
+      if (!more) return false;
+      more.click(); await wait(350);
+      const pm = document.querySelector(".popup");
+      dp.menu = pm ? Array.from(pm.children).map((d) => d.textContent) : null;
+      const mi = pm && Array.from(pm.children).find(
+        (d) => (d.textContent || "").indexOf("编辑截止日期") >= 0);
+      dp.menuHas = !!mi;
+      if (!mi) return false;
+      mi.click(); await wait(400);
+      return true;
+    };
+
+    /* ① 打开弹窗：标题 / 副标题 / 是个 date 框 / 空值时不给「清空」 */
+    dp.opened = await openViaMenu();
+    dp.dlgOpen = getComputedStyle($("#ovDate")).display !== "none";
+    dp.title = ($("#dateTitle").textContent || "").trim();
+    dp.sub = ($("#dateSub").textContent || "").trim();
+    dp.inputType = ($("#dateInput") || {}).type || "";
+    dp.clearHiddenWhenEmpty = getComputedStyle($("#dateClear")).display === "none";
+    dp.hasPh = !!document.querySelector("#ovDate .dph");
+    /* 自绘占位只在「空值**且未聚焦**」时露出（style.css: `:not(.hav):not(:focus) ~ .dph`）。
+       打开弹窗时输入框是聚焦的 —— 所以这里要分两态读：
+         聚焦 → 让位给原生 mask（用户得看得见自己敲的数字）；
+         失焦 → 才露出 YYYY/MM/DD。
+       ⚠⚠ 但**「聚焦让位」不能只看渲染结果**：`:focus` 到底匹不匹配，取决于窗口
+       是不是系统前台窗口。冒烟是无人值守跑的，窗口经常在后台，那时
+       `activeElement` 明明是输入框、`:focus` 却不生效 → 占位照旧露着，
+       于是断言在"代码一点没坏"的情况下红（2026-10-16 实测：同一份代码，
+       窗口在前台时读 false、在后台时读 true，来回翻）。
+       所以拆三层钉，只有第一层与窗口前台无关：
+         ① activeIsInput —— focus 有没有真的给到输入框（纯 DOM 状态）
+         ② focusRule    —— 样式表里那条 :not(:focus) ~ .dph 规则在不在（机制在不在）
+         ③ 失焦后露出   —— 无条件成立
+       渲染态（phVisibleWhileFocused）+ docHasFocus 只作诊断：前台时冒烟会
+       额外严格要求它必须让位，后台时这一项自动降级为"跳过渲染断言"。 */
+    dp.docHasFocus = document.hasFocus();
+    dp.activeIsInput = document.activeElement === $("#dateInput");
+    dp.focusRule = (() => {
+      for (const ss of Array.from(document.styleSheets)) {
+        let rules = null;
+        try { rules = ss.cssRules; } catch (e) { continue; }   // 跨域样式表读不了，跳过
+        for (const r of Array.from(rules || [])) {
+          const sel = r.selectorText || "";
+          if (sel.indexOf(".dph") >= 0 && sel.indexOf(":focus") >= 0) return sel;
+        }
+      }
+      return null;
+    })();
+    dp.phVisibleWhileFocused = (() => {
+      const ph = document.querySelector("#ovDate .dph");
+      return ph ? getComputedStyle(ph).display !== "none" : null;
+    })();
+    $("#dateInput").blur();
+    await wait(150);
+    dp.phVisibleWhenEmpty = (() => {
+      const ph = document.querySelector("#ovDate .dph");
+      return ph ? getComputedStyle(ph).display !== "none" : null;
+    })();
+
+    /* ② 选个日期 → 保存 → 库里真有 */
+    $("#dateInput").value = "2027-03-15";
+    $("#dateInput").dispatchEvent(new Event("input", { bubbles: true }));
+    await wait(150);
+    dp.hav = $("#dateInput").classList.contains("hav");    // 有值 → 自绘占位该让位
+    dp.phHiddenWhenHas = (() => {
+      const ph = document.querySelector("#ovDate .dph");
+      return ph ? getComputedStyle(ph).display === "none" : null;
+    })();
+    $("#dateOk").click();
+    await wait(1400);
+    dp.closed = getComputedStyle($("#ovDate")).display === "none";
+    dp.saved = await readDl();
+
+    /* ③ 再打开（这回有旧值：回填要对、占位要让位、「清空」该露头）→ 清空 → 库里空 */
+    await openViaMenu();
+    dp.reopenVal = ($("#dateInput") || {}).value || "";
+    dp.clearShownWhenHas = getComputedStyle($("#dateClear")).display !== "none";
+    $("#dateClear").click();
+    await wait(1400);
+    dp.afterClear = await readDl();
+
+    /* 收拾：样本节点带走 */
+    await call("delete", "node", nid);
+    await reload(); await wait(300);
+    dp.cleaned = !nodeRow(nid);
+    dp.errNew = window.__err === errBefore ? null : window.__err;
+    rep.date = dp;
   });
 
   try { await step("done"); } catch (e) { /* 收尾标记丢了不算失败 */ }

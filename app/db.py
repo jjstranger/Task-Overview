@@ -116,9 +116,18 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL DEFAULT '进行中',
     priority INTEGER NOT NULL DEFAULT 0,
     deadline TEXT,
+    -- 约定结款日（YYYY-MM-DD，用户手填）。已交付项目的「结款逾期 N 天」**只认它**，
+    -- 没填就不报（2026-10-13 用户定的：不再拿交付日期反推）。
+    -- 老库没有这一列，由 _migrate_columns 补上、值为空 —— 老项目想报结款逾期，
+    -- 得自己去「项目设置」里填一个日子。
+    settle_date TEXT,
     pinned INTEGER NOT NULL DEFAULT 0,
     note TEXT,
     artist TEXT,
+    -- 制作人 = vendors.id（2026-10-16 起强关联）。`artist` 那个裸文本列**留着不读**：
+    -- 显示名一律从 vendors JOIN 出来，老库里的自由文本由 _migrate_vendors()
+    -- 一次性转成条目再回填到这里（SQLite 删列要重建整张表，不拿真库冒险）。
+    artist_id INTEGER,
     collapsed INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
     last_activity_at TEXT,
@@ -139,6 +148,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     deadline TEXT,
     note TEXT,
     artist TEXT,
+    -- 环节的制作人跟项目层同一个口径（2026-10-16）：存 vendors.id，可空 = 未分配
+    artist_id INTEGER,
     last_activity_at TEXT,
     created_at TEXT,
     updated_at TEXT
@@ -176,6 +187,18 @@ CREATE TABLE IF NOT EXISTS clients (
     note TEXT
 );
 
+-- 外包商 / 制作人名录（2026-10-16）：个人或团队两种，字段刻意精简。
+-- 它同时是两个角色的主体：项目层与环节层的「制作人」挂它（projects.artist_id /
+-- nodes.artist_id），财务的「外包支出」也挂它（finance.vendor_id）——
+-- 同一个人既是干活的那个，也是收钱的那个，这正是要「打通」的意义。
+CREATE TABLE IF NOT EXISTS vendors (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '个人',
+    contact TEXT,
+    note TEXT
+);
+
 CREATE TABLE IF NOT EXISTS finance (
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL,
@@ -187,7 +210,10 @@ CREATE TABLE IF NOT EXISTS finance (
     date TEXT,
     status TEXT,
     invoice_no TEXT,
-    note TEXT
+    note TEXT,
+    -- 外包支出付给谁 = vendors.id（2026-10-16）。只对 kind='outsource' 有意义，
+    -- 别的款项类型一律空着；老库由 _migrate_columns 补出这一列（值为空）。
+    vendor_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS activity_log (
@@ -376,6 +402,8 @@ class Db:
         self._init_settings()
         self._init_groups()
         self._migrate_collapse_default()
+        # 必须排在 _migrate_columns 之后：它要用刚补出来的 artist_id 列
+        self._migrate_vendors()
         if first:
             self._seed()
         self._stamp = self._file_stamp()
@@ -391,6 +419,21 @@ class Db:
             }
             if "artist" not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN artist TEXT")
+            # 制作人改成挂 vendors.id（2026-10-16）。补出来是空的 → 由
+            # _migrate_vendors() 拿 artist 的裸文本回填，别的地方一律走 artist_id。
+            if "artist_id" not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN artist_id INTEGER")
+            # 结款日期只有项目层要，环节没有这个概念。补出来是空的（NULL）——
+            # 老项目不会凭空得到一个结款日，想报结款逾期得用户自己去填。
+            if table == "projects" and "settle_date" not in cols:
+                self.conn.execute("ALTER TABLE projects ADD COLUMN settle_date TEXT")
+            # 上一版那个 delivered_at（交付日期）列**故意留着不删**：SQLite 删列要重建
+            # 整张表，拿用户真库冒这个险不值当；代码已不再读它（2026-10-13 结款逾期
+            # 改用 settle_date，不再拿交付日期推算）。
+        # finance 只补一列：外包支出付给谁（别的款项类型用不上，一直空着）
+        fin_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(finance)")}
+        if "vendor_id" not in fin_cols:
+            self.conn.execute("ALTER TABLE finance ADD COLUMN vendor_id INTEGER")
 
     def _migrate_stale_unified(self) -> None:
         """停滞阈值从「商业 / 个人两档」并成一项 `stale_days`。
@@ -436,6 +479,59 @@ class Db:
             self.conn.execute("UPDATE projects SET collapsed=1")
             self.conn.execute("UPDATE nodes SET collapsed=1")
         self.set_setting("mig_collapse_default", "1")
+
+    def _migrate_vendors(self) -> None:
+        """把老库里「自由文本的制作人」变成外包商条目（2026-10-16）。
+
+        强关联（artist_id → vendors.id）对老库是**破坏性**的：15 个项目的
+        `artist` 是一串裸文本，直接上层就会变成"全都没制作人"。所以这里做一次
+        搬运，**不丢任何数据**：
+
+          1. 扫 projects.artist 与 nodes.artist 里所有非空、还没回填的值
+          2. 按 `casefold` 去重（跟 client_find_or_create 一个规矩：SQLite 的
+             COLLATE NOCASE 只认 ASCII，中文名得在 Python 里比）
+          3. 每个名字按原样建一条 vendors（kind 默认「个人」）
+          4. 回填 artist_id
+
+        跑完之后界面上看到的名字**和迁移前一模一样**，但每一条都成了可编辑、
+        可汇总的条目 —— 用户再去补类型和联系方式。
+
+        幂等：标记写过就不再动。快照回滚也走 `_connect`，老快照恢复回来同样
+        会被搬一次（那时 vendors 表是随快照一起重建的空表，重新搬才对）。
+
+        ⚠ `artist` 文本列不删也不清：删列要重建整表，清空则会让"回滚到旧版本"
+        这件事变得不可能。代码从这一版起不再读它。
+        """
+        if self.get_setting("mig_vendors", "") == "1":
+            return
+        with self.mutex:
+            # 先收编库里已存在的条目（正常是空的，防着手工改库 / 混合快照）
+            pool = {
+                str(r["name"]).strip().casefold(): int(r["id"])
+                for r in self.conn.execute("SELECT id, name FROM vendors")
+            }
+            for table in ("projects", "nodes"):
+                rows = list(self.conn.execute(
+                    f"SELECT id, artist FROM {table} "
+                    "WHERE artist_id IS NULL AND artist IS NOT NULL AND TRIM(artist)<>''"
+                ))
+                for r in rows:
+                    raw = str(r["artist"]).strip()
+                    key = raw.casefold()
+                    if not key:
+                        continue
+                    vid = pool.get(key)
+                    if vid is None:
+                        cur = self.conn.execute(
+                            "INSERT INTO vendors(name,kind,contact,note) VALUES(?,?,?,?)",
+                            (raw, "个人", "", ""),
+                        )
+                        vid = int(cur.lastrowid or 0)
+                        pool[key] = vid
+                    self.conn.execute(
+                        f"UPDATE {table} SET artist_id=? WHERE id=?", (vid, r["id"])
+                    )
+        self.set_setting("mig_vendors", "1")
 
     def _migrate_statuses(self) -> None:
         """把老状态词换成新词（环节 `未开始`→`待开始`、`搁置`→`暂停`；项目 `搁置`→`中止`）。

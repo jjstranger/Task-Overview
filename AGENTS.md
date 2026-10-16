@@ -32,8 +32,8 @@ PY="<venv>/Scripts/python.exe"
 "$PY" tools/ver.py save "这轮改了什么"        # 提交
 "$PY" tools/ver.py tag v1.2 "里程碑说明"      # 打标签
 
-# 数据层回归：改了 Python 必须全跑（8 个）
-for t in db finance project_money m4 node_spec activity_weight bulk export; do "$PY" tests/smoke_$t.py; done
+# 数据层回归：改了 Python 必须全跑（9 个）
+for t in db finance project_money m4 node_spec activity_weight bulk export payoff; do "$PY" tests/smoke_$t.py; done
 
 # GUI / 打包态冒烟（必须带 fallback；两者不能并行）
 "$PY" tests/_diag/smoke_fin_gui.py fallback
